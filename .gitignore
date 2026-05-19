@@ -1,0 +1,58 @@
+# ── Secrets / local config ───────────────────────────────────────────────
+.env
+.env.*
+!.env.template
+*.key
+*.pem
+
+# GCP credentials for VOD reprocessing (see REPROCESS_VOD.md)
+.gcp-adc.json
+.gcp-*.json
+gcp-*.json
+
+# ── Per-deployment runtime state ─────────────────────────────────────────
+# These files are seeded empty in the repo; the app writes user data into
+# them at runtime. Don't track those edits.
+outputs.json
+vod-jobs.json
+
+# ── Generated / cached / large ───────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# ── Local artefacts (recordings, uploads, samples) ───────────────────────
+results/
+uploads/
+samples/
+screenshots/
+# (samples/ also gitignored — drop your own test audio in there locally.)
+
+# ── Media (test clips, intermediates) ────────────────────────────────────
+*.mov
+*.mp4
+*.mkv
+*.wav
+*.mp3
+*.flac
+*.m4a
+
+# ── OS / editor cruft ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

@@ -1,0 +1,44 @@
+[project]
+name = "live-captions"
+version = "0.1.0"
+description = "Real-time multilingual live captions powered by Sarvam AI"
+requires-python = ">=3.10"
+dependencies = [
+    # Web server (HTTP + WebSocket)
+    "aiohttp>=3.10",
+    # Sarvam AI streaming STT + translation
+    "sarvamai>=0.1.28",
+    # Pin <14: sarvamai uses the legacy websockets module. Behaviour changed
+    # around send-flow control in 14+; on 16.0 the first ws.transcribe() hangs
+    # forever, so the audio queue overflows and every chunk after the first
+    # is dropped. 13.x ships the legacy module with the old, working semantics.
+    "websockets>=12,<14",
+    # Audio capture and processing
+    "sounddevice>=0.5",
+    "soundfile>=0.12",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    # Utilities
+    "python-dotenv>=1.0",
+    # mDNS service advertisement so caption sidecars (e.g. Raspberry Pi
+    # displays) can auto-discover the tool wherever it's running on the LAN.
+    "zeroconf>=0.130",
+]
+
+# Optional dependencies for the offline VOD-reprocessing CLI
+# (tools/reprocess_vod.py). Install with:
+#     uv sync --extra vod
+# These pull in ~150 MB of Google SDKs and are not needed for the live tool.
+[project.optional-dependencies]
+vod = [
+    "google-cloud-speech>=2.27",
+    "google-cloud-translate>=3.15",
+    "google-cloud-storage>=2.18",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

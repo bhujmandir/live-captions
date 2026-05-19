@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens — dark by default. Operators run in dimly-lit broadcast
+   rooms, so a light theme would be hostile. Tokens are HSL channels so
+   Tailwind opacity modifiers (bg-accent/30) compose correctly. */
+:root {
+  /* Surface ladder. Each step is ~2% lighter than the one below so a
+     stack of cards has a perceptible depth without ever shouting. */
+  --bg:          222 16% 6%;
+  --surface:     220 14% 9%;
+  --elevated:    220 13% 12%;
+  --border:      220 12% 18%;
+  --muted:       220 10% 26%;
+  --fg:          220 18% 96%;
+  --fg-muted:    220 10% 62%;
+
+  /* Accent overridden at runtime by /api/config (ACCENT_COLOR env).
+     This default is a calmer orange than full-saturation #FF8C00 —
+     the env value still wins, but a misconfigured server won't blind
+     anyone in the meantime. */
+  --accent:      28 92% 56%;
+  --accent-fg:   28 30% 8%;
+
+  /* On-air red — used for the REC indicator and danger button. Slightly
+     desaturated from a pure broadcast red so it doesn't bloom. */
+  --rec:         358 75% 56%;
+
+  --success:     142 55% 48%;
+  --warn:         38 95% 55%;
+  --danger:      358 75% 56%;
+
+  /* Focus ring channels. Slightly larger offset feels more deliberate
+     than the default Tailwind ring; uses the accent so it tracks any
+     org branding change. */
+  --ring:        var(--accent);
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  /* Subtle radial vignette so the surface reads as a console rather
+     than flat #0e1014. Barely visible — about 4% delta corner to centre. */
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 0%, hsl(220 14% 11%) 0%, hsl(var(--bg)) 60%),
+    hsl(var(--bg));
+  /* Tighter default tracking — broadcast UIs read better with -0.01em
+     across body copy. */
+  letter-spacing: -0.005em;
+  font-feature-settings: "ss01", "cv11";   /* tabular-ish, no-op on system fonts */
+}
+
+/* Overlay surface — transparent body so ProPresenter's Web Object
+   composites the caption block over the program feed without keying. */
+body.overlay {
+  background: transparent !important;
+}
+body.overlay #root { background: transparent; }
+
+/* Custom scrollbar — thin, dark-mode native, never autohides. */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted)); }
+
+/* Strip the iOS / Safari blue tap highlight on buttons. */
+button { -webkit-tap-highlight-color: transparent; }
+
+/* REC pulse for the on-air indicator. Slow, subtle — a stage manager
+   should notice from across the room without it being distracting. */
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.85); }
+}
+.rec-pulse { animation: rec-pulse 1.6s ease-in-out infinite; }
