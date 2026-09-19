@@ -95,7 +95,15 @@ export function OverlayView() {
   return (
     <div style={{
       position: "fixed",
-      inset: 0,
+      // Longhand, not `inset: 0`. vMix's Web Browser input is Chromium 51,
+      // which predates `inset` (Chrome 87) — it would drop the declaration
+      // silently, this container would collapse to nothing, and the captions
+      // would vanish from the hall screens with no error anywhere. The
+      // overlay renders in that browser, so it is held to its capabilities.
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
       overflow: "hidden",
       background: "transparent",
     }}>
@@ -110,7 +118,7 @@ export function OverlayView() {
         width:  STAGE_W * layout.scale,
         height: STAGE_H * layout.scale,
       }}>
-        <CaptionRenderer stageScale={layout.scale} showGuides={false} />
+        <CaptionRenderer stageScale={layout.scale} />
       </div>
     </div>
   );

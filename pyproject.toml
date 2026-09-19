@@ -7,7 +7,7 @@ dependencies = [
     # Web server (HTTP + WebSocket)
     "aiohttp>=3.10",
     # Sarvam AI streaming STT + translation
-    "sarvamai>=0.1.28",
+    "sarvamai>=0.1.29",
     # Pin <14: sarvamai uses the legacy websockets module. Behaviour changed
     # around send-flow control in 14+; on 16.0 the first ws.transcribe() hangs
     # forever, so the audio queue overflows and every chunk after the first
@@ -36,9 +36,25 @@ vod = [
     "google-cloud-storage>=2.18",
 ]
 
+# Test tooling. Install and run with:
+#     uv run --extra dev pytest
+# The suite needs no network, no SARVAM_API_KEY and no audio device.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests import live_captions.py from the repo root.
+pythonpath = ["."]
+# Async tests are plain `async def` — no per-test marker needed.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

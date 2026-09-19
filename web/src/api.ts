@@ -25,8 +25,23 @@ export function connectWs() {
   };
 }
 
-function handleWsMessage(msg: WsMsg) {
-  const st = useStore.getState();
+// The whole of the wire protocol, in one place: a pure function from a
+// message to a store mutation. Every timing behaviour the hall can see —
+// a caption replacing the last, the silence clear, blanking on disconnect —
+// arrives through here, so exporting it is what makes those behaviours
+// assertable under plain node.
+//
+// `store` is a parameter so a test can pass an isolated store rather than
+// mutating the app-wide singleton.
+// `now` is a parameter for the same reason `store` is: arrival time is a fact
+// about the message, and a test that cannot control it cannot assert anything
+// the silence clear does.
+export function handleWsMessage(
+  msg: WsMsg,
+  store: { getState: () => any } = useStore,
+  now: number = Date.now(),
+) {
+  const st = store.getState();
   switch (msg.type) {
     case "session_status":
       st.setRunning(msg.running);
@@ -34,7 +49,7 @@ function handleWsMessage(msg: WsMsg) {
       if (msg.device) st.setAudioDevice(msg.device);
       break;
     case "final":
-      st.pushFinal(msg.text, msg.raw || "", msg.rules_fired || []);
+      st.pushFinal(msg.text, msg.raw || "", msg.rules_fired || [], now);
       break;
     case "partial":
       st.setPartialActive(!!(msg.text && msg.text.trim()));
@@ -51,8 +66,17 @@ function handleWsMessage(msg: WsMsg) {
       st.setPartialActive(false);
       break;
     case "reconnected":
-      // Legacy UI also handled this — could surface a brief chip if we
-      // wanted. For now just ignore (status pill already shows "open").
+      // Superseded for this UI by `connection`, which carries the same
+      // attempt number plus the state itself. Still emitted on the bus, so
+      // anything else reading it keeps working.
+      break;
+    case "connection":
+      st.setLink({
+        state:      msg.state,
+        attempt:    msg.attempt ?? 0,
+        reason:     msg.reason ?? null,
+        retryInSec: msg.retry_in_sec ?? null,
+      });
       break;
     case "feeds_list":
       st.setFeeds(msg.feeds || []);

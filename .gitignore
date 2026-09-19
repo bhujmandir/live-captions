@@ -15,6 +15,25 @@ gcp-*.json
 # them at runtime. Don't track those edits.
 outputs.json
 vod-jobs.json
+# glossary.json is TRACKED again as of 2026-09-01. It was ignored because this
+# repo was public and the file names the event; both repos went private that
+# day, which removes the reason. Tracking it is now the point: the glossary is
+# the whole quality margin (a briefed model scores 24/24 on terminology, the
+# same model cold scores like the cheap one), it was surviving only as an
+# untracked file on one Windows PC, and it is the artefact a Gujarati reader
+# reviews. An unbacked-up file that nobody can review is the bigger risk.
+# glossary.example.json stays as the empty schema for a fresh deployment.
+#
+# Still true, and unchanged by any of this: NO KEYS IN TRACKED FILES. Private
+# is not a reason to relax .env.
+
+# Operator logs. A deployment that redirects server output into the repo
+# leaves `?? logs/` in git status — the same invisible trap as the
+# glossary, and the mandir PC walked into it within the hour. A caption
+# log holds the whole katha transcript, so committing one to a public
+# repo is worse than the glossary would have been.
+logs/
+*.log
 
 # ── Generated / cached / large ───────────────────────────────────────────
 .venv/

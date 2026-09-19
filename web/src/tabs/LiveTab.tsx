@@ -9,6 +9,7 @@ import { FloatingToolbar } from "@/components/FloatingToolbar";
 import { DraggableRect, type Bounds, type SnapInfo } from "@/components/DraggableRect";
 import { SnapGuides } from "@/components/SnapGuides";
 import { TransportButton } from "@/components/TransportButton";
+import { LinkBanner, LinkChip } from "@/components/ConnectionStatus";
 import {
   Mic, ArrowLeftRight, AlertCircle, FileAudio,
   Upload, Download, X, Loader2,
@@ -204,6 +205,9 @@ export function LiveTab() {
 
       {/* Stage preview with draggable rects */}
       <div className="relative bg-bg overflow-hidden">
+        {/* Over the preview, not beside it: a fault is the one thing the
+            operator must not have to go looking for. */}
+        <LinkBanner />
         <div
           ref={wrapRef}
           className="absolute inset-0 grid place-items-center"
@@ -219,7 +223,7 @@ export function LiveTab() {
             onClick={(e) => { e.stopPropagation(); setActiveRect(null); }}
           >
             {/* Caption renderer — read-only at this layer */}
-            <CaptionRenderer stageScale={scale} showGuides={false} />
+            <CaptionRenderer stageScale={scale} desk />
 
             {/* Overlay for direct manipulation. Everything inside is in
                 STAGE coordinates; we wrap it in a transform that matches
@@ -269,23 +273,28 @@ export function LiveTab() {
           </div>
         </div>
 
-        {/* Audio meter */}
+        {/* Link state and audio meter, side by side. Together they answer the
+            only question the operator has mid-katha: is this thing working,
+            and if there is nothing on screen, why. */}
         {running && (
-          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-3 px-3 py-1.5 rounded-full bg-surface border border-border z-10">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-fgMuted">audio</span>
-            <div className="w-40 h-1.5 bg-elevated rounded-full overflow-hidden">
-              <div
-                className={cn(
-                  "h-full transition-all",
-                  (audioPeak ?? 0) > 0.5 ? "bg-warn"
-                  : (audioPeak ?? 0) > 0.01 ? "bg-success" : "bg-muted",
-                )}
-                style={{ width: `${Math.min(100, (audioPeak ?? 0) * 100).toFixed(1)}%` }}
-              />
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-2 z-10">
+            <LinkChip />
+            <div className="flex items-center gap-3 px-3 py-1.5 rounded-full bg-surface border border-border">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-fgMuted">audio</span>
+              <div className="w-40 h-1.5 bg-elevated rounded-full overflow-hidden">
+                <div
+                  className={cn(
+                    "h-full transition-all",
+                    (audioPeak ?? 0) > 0.5 ? "bg-warn"
+                    : (audioPeak ?? 0) > 0.01 ? "bg-success" : "bg-muted",
+                  )}
+                  style={{ width: `${Math.min(100, (audioPeak ?? 0) * 100).toFixed(1)}%` }}
+                />
+              </div>
+              <span className="font-mono text-xs text-fgMuted w-8 text-right">
+                {audioPeak == null ? "—" : `${Math.round((audioPeak) * 100)}%`}
+              </span>
             </div>
-            <span className="font-mono text-xs text-fgMuted w-8 text-right">
-              {audioPeak == null ? "—" : `${Math.round((audioPeak) * 100)}%`}
-            </span>
           </div>
         )}
       </div>
@@ -351,8 +360,14 @@ export function LiveTab() {
               >
                 {devices.length === 0 && <option value="">No devices found</option>}
                 {devices.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}{d.default ? " (default)" : ""}
+                  <option
+                    key={d.id}
+                    value={d.id}
+                    disabled={d.worksAt16k === false}
+                  >
+                    {d.name}
+                    {d.default ? " (default)" : ""}
+                    {d.worksAt16k === false ? " — unavailable at 16 kHz" : ""}
                   </option>
                 ))}
               </select>

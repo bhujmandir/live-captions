@@ -155,7 +155,9 @@ SARVAM_API_KEY=
 # ACCENT_COLOR=#FF8C00
 
 # Optional default language direction (Sarvam codes; e.g. gu-IN, hi-IN)
-# DEFAULT_SOURCE_LANG=en-IN
+# The default is pinned to gu-IN -> en-IN so a fresh machine never starts on
+# a guessed language pair. Change both lines for a different event.
+# DEFAULT_SOURCE_LANG=gu-IN
 # DEFAULT_TARGET_LANG=en-IN
 
 # ProPresenter (only used when --propresenter is passed)
@@ -205,7 +207,38 @@ if [[ "$START" == "false" ]]; then
   exit 0
 fi
 
-hdr "7. Port check"
+hdr "7. Web UI"
+
+# Without this the installer finishes "successfully" and the operator page is
+# a "UI not built yet" placeholder: web/dist/ is gitignored, so a fresh clone
+# has no built UI and nothing here used to build one. deploy.ps1 has installed
+# Node and pnpm from the start; this side never did, and the gap only shows up
+# after everything has printed OK.
+if [ -f web/dist/index.html ]; then
+  ok "Web UI already built."
+elif pnpm --version >/dev/null 2>&1; then
+  echo "    Building the operator page and overlay (first run takes a minute)..."
+  ( cd web && pnpm install --frozen-lockfile && pnpm build ) \
+    && ok "Web UI built." \
+    || err "Web UI build FAILED - the operator page will show a placeholder."
+elif npm --version >/dev/null 2>&1; then
+  # `command -v pnpm` is deliberately NOT the test above. A pnpm on PATH can
+  # still be a broken shim — a Homebrew pnpm looking for pnpm.cjs against a
+  # v12 that ships pnpm.mjs throws a module-loader error and is useless. Asking
+  # it for its version is the check that tells the difference.
+  echo "    No working pnpm; installing it with npm..."
+  npm install -g pnpm \
+    && ( cd web && pnpm install --frozen-lockfile && pnpm build ) \
+    && ok "Web UI built." \
+    || err "Web UI build FAILED - the operator page will show a placeholder."
+else
+  err "Node.js is not installed, so the web UI cannot be built."
+  echo "    The server will still start, but the operator page will show a"
+  echo "    placeholder. Install Node from https://nodejs.org, then run:"
+  echo "        cd web && npm install -g pnpm && pnpm install && pnpm build"
+fi
+
+hdr "8. Port check"
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   err "Port $PORT is already in use. Either stop the other process, or:"
   echo "        bash deploy.sh --port=8766"
@@ -215,15 +248,18 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 ok "Port $PORT is free."
 
-hdr "8. Starting captions server"
+hdr "9. Starting captions server"
 echo
 echo "    Operator URL:    ${BOLD}http://localhost:$PORT/${NC}"
 echo "    Overlay URL:     ${BOLD}http://localhost:$PORT/?overlay=1${NC}"
 echo "    Debug panel:     append  ?debug=1  to the operator URL"
 echo
-echo "    Stop with Ctrl+C. Re-start with:"
+echo "    Stop with:  ${BOLD}./stop-captions.sh${NC}   (NOT Ctrl+C - see README)"
+echo "    Re-start with:"
 echo "        cd $CAPTIONS_DIR && bash deploy.sh --start-only"
 echo
 
-# Exec replaces the shell so Ctrl+C goes straight to Python, no orphan shell.
+# Exec replaces the shell so a signal goes straight to Python with no orphan
+# shell in between — which also means Python's own interrupt policy is the one
+# that decides, rather than a wrapper dying first and taking it down anyway.
 exec uv run python live_captions.py --port "$PORT"

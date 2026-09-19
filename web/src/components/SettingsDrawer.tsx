@@ -72,6 +72,10 @@ export function SettingsDrawer() {
 function SarvamSection() {
   const s = useStore((st) => st.settings);
   const set = useStore((st) => st.updateSettings);
+  // Model options come from /api/config (SARVAM_MODELS in live_captions.py)
+  // — the server owns the list so a withdrawn model can't be offered here
+  // and a new one doesn't need a matching edit in two places.
+  const models = useStore((st) => st.sarvamModels);
   return (
     <section>
       <SectionTitle icon={Wand2}>Sarvam STT</SectionTitle>
@@ -81,9 +85,9 @@ function SarvamSection() {
           onChange={(e) => set({ sarvamModel: e.target.value })}
           className="h-9 w-full rounded-md border border-border bg-surface px-3 text-sm"
         >
-          <option value="saaras:v3">saaras:v3 (default)</option>
-          <option value="saaras:v2.5">saaras:v2.5 (legacy)</option>
-          <option value="saaras:v2">saaras:v2 (legacy)</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
         </select>
       </Field>
       <Row>
