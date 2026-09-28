@@ -19,8 +19,11 @@ import base64
 import collections
 import json
 import logging
+import logging.handlers
 import os
 import re
+import signal
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,8 +33,101 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+LOG_FORMAT      = "%(asctime)s %(levelname)s %(message)s"
+LOG_FILENAME    = "live-captions.log"
+LOG_RETAIN_DAYS = 14
+LOG_DIR_ENV     = "LIVE_CAPTIONS_LOG_DIR"
+
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 log = logging.getLogger("captions")
+
+# The file handler, once `configure_logging` has placed one. Module-level so a
+# second call replaces it instead of stacking a duplicate — every line landing
+# twice is how a log stops being read.
+_file_handler: "logging.Handler | None" = None
+
+
+def _log_dir_candidates(log_dir: "str | None") -> "list[Path]":
+    """Where to try putting the log, best first.
+
+    An explicit directory (or the environment) is a decision someone made,
+    so it gets one attempt and no second-guessing: silently writing
+    somewhere else would be worse than no file. Otherwise we walk a chain,
+    because the mandir PC is the machine that will one day be locked down
+    with the install directory read-only, and a lost log is exactly what
+    issue #57 is about.
+    """
+    if log_dir:
+        return [Path(log_dir)]
+
+    env = os.environ.get(LOG_DIR_ENV)
+    if env:
+        return [Path(env)]
+
+    # Next to the code, because whoever is diagnosing already has the
+    # checkout open. `logs/` is gitignored.
+    out = [Path(__file__).resolve().parent / "logs"]
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        out.append(Path(local) / "live-captions" / "logs")
+    out.append(Path(tempfile.gettempdir()) / "live-captions-logs")
+    return out
+
+
+def configure_logging(log_dir: "str | None" = None) -> "Path | None":
+    """Put the log somewhere that survives the window that started it.
+
+    Issue #57: on 3 September the server ran for 98 minutes doing nothing
+    and left NO log, because `basicConfig` alone writes to stderr and
+    stderr was a console window nobody kept. The cause had to be
+    reconstructed from `explorer.exe` start times. Two later outages the
+    same night were diagnosed in seconds — from a redirect someone had
+    typed by hand, which lived exactly as long as that one launch.
+
+    Returns the path now being written to, or None if nothing was
+    writable. Never raises: a katha with captions and no log beats no
+    katha, so a logging fault degrades to console-only and says so.
+    """
+    global _file_handler
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter(LOG_FORMAT)
+
+    # basicConfig() at import normally supplies this. Re-adding it when it is
+    # missing matters for the embedded cases (a test, a REPL) where the file
+    # is the only handler and a silent console is confusing.
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+               for h in root.handlers):
+        console = logging.StreamHandler()
+        console.setFormatter(fmt)
+        root.addHandler(console)
+
+    if _file_handler is not None:
+        root.removeHandler(_file_handler)
+        _file_handler.close()
+        _file_handler = None
+
+    for d in _log_dir_candidates(log_dir):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / LOG_FILENAME
+            # Rotate at midnight rather than by size: "what happened on the
+            # 3rd" is the question that gets asked, and a katha PC is never
+            # tidied by hand, so an unbounded file is a disk-full outage
+            # waiting a year to happen.
+            handler = logging.handlers.TimedRotatingFileHandler(
+                path, when="midnight", backupCount=LOG_RETAIN_DAYS,
+                encoding="utf-8",
+            )
+            handler.setFormatter(fmt)
+            root.addHandler(handler)
+            _file_handler = handler
+            return path
+        except OSError:
+            continue
+
+    return None
 
 # ── Ring buffer for the in-browser debug panel ───────────────────────────────
 # A logging.Handler appends pipeline-relevant records into a bounded deque
@@ -174,9 +270,45 @@ def langname(code: str) -> str:
     # Drop the native-script tail for clean log lines: "Gujarati  ગુજરાતી" → "Gujarati"
     return raw.split("  ")[0] if "  " in raw else raw
 
+# ── Sarvam Saaras model list ─────────────────────────────────────────────────
+# Every Saaras STT model the settings UI may offer. Defined once, here —
+# /api/config hands this same list to the React settings dropdown, and the
+# session-start path validates against it, so the server and the UI cannot
+# drift apart the way a hardcoded <option> list and a hardcoded server
+# default previously could.
+#
+# Verified against Sarvam's live docs and the installed sarvamai SDK
+# (2026-08-31; SpeechToTextStreamingModel = Literal["saaras:v3", "saaras:v4"]
+# on the exact `speech_to_text_streaming.connect()` call this app makes):
+#   saaras:v3   — current default, still the vendor's recommended model
+#   saaras:v4   — current generation ("latest"); adds Global English on top
+#                 of the same 22-Indic-language coverage as v3
+#
+# Two models are deliberately absent, both for the same reason — selecting
+# either one fails the connection, and a katha is a live event where an
+# operator picking the wrong entry from a dropdown means no captions in
+# front of a full hall:
+#   saaras:v2   — withdrawn by the vendor.
+#   saaras:v2.5 — not withdrawn, but not reachable from here. It exists only
+#                 on Sarvam's separate `speech_to_text_translate_streaming`
+#                 client, which this app never calls. Offering it labelled
+#                 as broken was considered and rejected: a label does not
+#                 stop a tired operator at 6am, and there is no case where
+#                 choosing it is the right answer.
+SARVAM_MODELS: list[dict[str, str]] = [
+    {"id": "saaras:v3", "label": "saaras:v3 (default)"},
+    {"id": "saaras:v4", "label": "saaras:v4 (latest)"},
+]
+SARVAM_MODEL_IDS: set[str] = {m["id"] for m in SARVAM_MODELS}
+DEFAULT_SARVAM_MODEL = "saaras:v3"
+
 # Per-deployment direction defaults — set in .env so a fresh deploy lands on
-# the org's most-common direction without operator setup.
-DEFAULT_SOURCE_LANG = os.environ.get("DEFAULT_SOURCE_LANG", "en-IN").strip() or "en-IN"
+# the org's most-common direction without operator setup. This fork's own
+# default is pinned to the katha's actual, fixed direction (Gujarati spoken
+# → English captions) rather than the generic en-IN/en-IN fallback, so a
+# first-ever boot (no .env override, no browser localStorage yet) never
+# lands on a guessed/wrong direction — see issue #12.
+DEFAULT_SOURCE_LANG = os.environ.get("DEFAULT_SOURCE_LANG", "gu-IN").strip() or "gu-IN"
 DEFAULT_TARGET_LANG = os.environ.get("DEFAULT_TARGET_LANG", "en-IN").strip() or "en-IN"
 if DEFAULT_SOURCE_LANG not in SARVAM_LANG_CODES:
     DEFAULT_SOURCE_LANG = "en-IN"
@@ -184,6 +316,165 @@ if DEFAULT_TARGET_LANG not in SARVAM_LANG_CODES:
     DEFAULT_TARGET_LANG = "en-IN"
 
 SARVAM_TRANSLATE_URL = "https://api.sarvam.ai/translate"
+
+# ── Keep-alive through gated silence ─────────────────────────────────────
+# Sarvam closes a connection that has received nothing for 60 s. The client
+# silence gate (see sarvam_loop) stops sending 1.5 s after the last loud
+# audio, so any pause longer than about a minute — a musical item, a reading,
+# a break — used to end the session outright. The reconnect that followed was
+# the expensive part: its backoff can reach 8 s, so the connection came back
+# during the opening words of the next passage, and repeated teardowns across
+# one long silence risk the rate limiter refusing to let us back in at all.
+#
+# A frame of digital silence every SARVAM_KEEPALIVE_SEC stops the teardown
+# happening. Digital silence rather than the room noise the gate just
+# rejected, so there is still nothing to transcribe and the gate's purpose —
+# not paying for an empty room — is untouched.
+#
+# MEASURED 2026-08-31 against the live endpoint, and it does not match the
+# assumption above. Five idle sessions were opened, spoken to briefly, then
+# sent nothing: four survived three minutes; one died at 50s with
+# "1011 internal error — keepalive ping timeout". There is no reliable 60s
+# idle timeout. The one real failure was the WebSocket protocol ping: this
+# client pings every 20s (the library default — the vendor SDK passes no ping
+# settings), the service does not answer while idle, and OUR side hangs up.
+#
+# The keep-alive is kept, and defaults ON, for three reasons that survive that
+# correction: it is proven harmless (30s of pure digital silence returned zero
+# captions, three trials, so it cannot put invented text on a temple screen);
+# it costs 14 frames per five-minute pause against a ~600-frame alternative;
+# and across 28 hours of live event a rare fault is a certainty. It is
+# insurance, NOT a fix for the cause above — honest reconnection is what
+# actually covers that. Set SARVAM_KEEPALIVE=off to disable it entirely.
+# Named "assumed", not "the" idle timeout, deliberately: the measurement above
+# found no reliable timeout at all. This is the pessimistic figure the
+# keep-alive interval is sized against, so that the interval stays small
+# whatever the true threshold turns out to be. Do not restate it as a vendor
+# fact — in a comment, in .env.template, or to an operator.
+ASSUMED_IDLE_TIMEOUT_SEC = 60.0
+KEEPALIVE_ENABLED = os.environ.get("SARVAM_KEEPALIVE", "on").strip().lower() \
+    not in {"0", "off", "false", "no"}
+
+
+# Half the idle window is the widest interval that still defends it. A
+# keep-alive can only leave on an audio frame that has arrived, so the gap
+# Sarvam actually sees is the interval plus up to one frame, plus whatever
+# the network adds; and an interval of half the window survives losing a beat
+# entirely. Anything wider is margin we would only discover we needed live.
+MAX_KEEPALIVE_SEC = ASSUMED_IDLE_TIMEOUT_SEC / 2
+
+
+def _resolve_keepalive_sec(value, fallback: float) -> float:
+    """The configured interval if it defends the idle window, else `fallback`.
+
+    A value past `MAX_KEEPALIVE_SEC` leaves too little margin to be worth
+    trusting, and a non-positive one would send a frame for every frame of
+    silence. Neither is accepted silently — a deployment that mistyped this
+    would otherwise look configured while still dropping the session during a
+    long pause.
+    """
+    try:
+        secs = float(value)
+    except (TypeError, ValueError):
+        secs = 0.0
+    if 0 < secs <= MAX_KEEPALIVE_SEC:
+        return secs
+    log.warning(f"Keep-alive interval {value!r} ignored — must be > 0 and <= "
+                f"{MAX_KEEPALIVE_SEC:.0f}s; using {fallback:.0f}s")
+    return fallback
+
+
+KEEPALIVE_SEC = _resolve_keepalive_sec(
+    os.environ.get("SARVAM_KEEPALIVE_SEC", 20.0), 20.0)
+
+
+# Indic → English normally takes Saaras's one-call translate mode: the audio
+# goes in and English comes out. It is the fastest path and it is what runs by
+# default — but it NEVER returns what was actually said. Measured at the mandir
+# on 2026-08-31: 24 finals recorded, zero characters of Gujarati in any of them.
+#
+# That matters beyond bookkeeping. Without the source text you cannot tell a
+# mishearing from a mistranslation, cannot build a correction rule for a name
+# that came out wrong, and cannot compare one translator against another —
+# because you have nothing to feed the second one.
+#
+# Setting this forces the two-hop path that already exists for other language
+# pairs: Saaras transcribes in Gujarati, then Mayura translates that text. Both
+# halves are then recorded. It costs one extra API call per line and some
+# latency, which is why it is not the default.
+RECORD_SOURCE_TEXT = os.environ.get("SARVAM_RECORD_SOURCE", "").strip().lower() \
+    in {"1", "on", "true", "yes"}
+
+
+# ── Sentence-mode configuration ──────────────────────────────────────────
+# Defaults chosen for a katha: the screen is read, not conversed with, so a
+# whole sentence a little late beats half a sentence promptly. Every value is
+# an env var so the mandir can be re-tuned on the day without a code change;
+# CAPTION_SENTENCE_MODE=off restores the old per-utterance behaviour exactly.
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except (TypeError, ValueError):
+        log.warning(f"{name}: not a number, using {default}")
+        return default
+
+
+SENTENCE_MODE = (os.environ.get("CAPTION_SENTENCE_MODE", "on").strip().lower()
+                 not in {"0", "off", "false", "no"})
+# Hard ceiling on how stale a caption may be. A speaker in full flow yields
+# neither punctuation nor a pause, and the hall still needs words.
+SENTENCE_MAX_WAIT_SEC = _env_float("CAPTION_SENTENCE_MAX_WAIT_SEC", 8.0)
+# The speaker has stopped; waiting longer buys nothing. 2.5s, not the 1.2s
+# first guessed: on a real reading the median gap BETWEEN segments of one
+# continuous sentence was 1.5s, so a 1.2s threshold released mid-sentence
+# almost every time. Pauses between actual sentences ran 4.5s and up.
+SENTENCE_QUIET_SEC    = _env_float("CAPTION_SENTENCE_QUIET_SEC", 2.5)
+# Never let one caption become a wall of text on the screen.
+#
+# 180, not the 220 first guessed. 220 characters is roughly 35-40 words, which
+# needs about 13 seconds to read and is given about 4 — captions arrive every
+# ~4.0s on this speaker. The old ceiling permitted captions that were
+# mathematically unreadable before being replaced, and no display timer can
+# fix that; only a shorter caption can.
+#
+# 180 is about FOUR DISPLAYED LINES, not two.
+#
+# 🔴 The "about 90 characters fit one line" figure this was first justified by
+# is wrong for the shipped layout. Measured in Chrome against the default
+# 1280px area at 56px: 51 characters per line, so two lines hold about 102.
+# The 90 came from the mandir PC's own layout and was applied to a different
+# one without checking.
+#
+# The overlay now SPLITS a caption that does not fit into successive LINES
+# rather than truncating it, so this is no longer a clipping ceiling. What it
+# still bounds is how long one caption can occupy the screen: at 51 characters
+# a line, 180 is about four lines, and with two on screen at a time that is
+# two full screens — roughly 8 seconds at the ~1.9s line cadence. A caption
+# much longer than that would still be scrolling through when the next several
+# have been spoken.
+#
+# It also bounds what one drop costs. The queue drops a caption WHOLE rather
+# than beheading it (see docs/how-it-works.md), so this ceiling is also the largest
+# amount of speech a single drop can take from the hall.
+#
+# ⚠️ Raising this re-opens the fault. It is a READABILITY ceiling, not a
+# storage one — the constraint is the sabha's eyes, not the wire.
+#
+# The default is a NAMED constant, not a literal in the call, so a test can
+# assert the shipped value. Reading it back through _env_float() would only
+# re-state the default the test itself passed in — a check reporting what was
+# asked for rather than what happened, which is the exact disease that has
+# already cost this project a mid-katha hour.
+SENTENCE_MAX_CHARS_DEFAULT = 180
+SENTENCE_MAX_CHARS    = int(_env_float("CAPTION_SENTENCE_MAX_CHARS", SENTENCE_MAX_CHARS_DEFAULT))
+# A full stop under this many words is treated as a VAD artefact, not a
+# sentence end. See the note in SentenceAssembler.add().
+SENTENCE_MIN_WORDS    = int(_env_float("CAPTION_SENTENCE_MIN_WORDS", 5))
+# How often the timer checks whether a held sentence has come due. Cheap, and
+# it bounds the error on the two time-based releases above.
+# How long a closing session waits for queued captions to be published.
+SENTENCE_DRAIN_SEC    = _env_float("CAPTION_SENTENCE_DRAIN_SEC", 10.0)
 
 
 def derive_pipeline(source: str, target: str) -> dict:
@@ -198,17 +489,24 @@ def derive_pipeline(source: str, target: str) -> dict:
         "sarvam_mode":       "translate" | "transcribe",
         "sarvam_lang":       <source>,
         "saaras_output_lang":<lang the Saaras transcript will be in>,
-        "needs_mayura":      bool,
+        "needs_translation": bool,   # a separate translate step is required
       }
     """
     if source == target:
         return {"sarvam_mode": "transcribe", "sarvam_lang": source,
-                "saaras_output_lang": source, "needs_mayura": False}
-    if target == "en-IN" and source != "en-IN":
+                "saaras_output_lang": source, "needs_translation": False}
+    # The one-call shortcut asks Saaras to translate as it transcribes, so
+    # the source text never exists. That is fine for Sarvam's own translator
+    # and useless for any other: an external translator has nothing to work
+    # from. So choosing one puts us on the two-hop path, exactly as asking
+    # to record the source does.
+    external = TRANSLATOR != "sarvam"
+    if target == "en-IN" and source != "en-IN" \
+            and not RECORD_SOURCE_TEXT and not external:
         return {"sarvam_mode": "translate", "sarvam_lang": source,
-                "saaras_output_lang": "en-IN", "needs_mayura": False}
+                "saaras_output_lang": "en-IN", "needs_translation": False}
     return {"sarvam_mode": "transcribe", "sarvam_lang": source,
-            "saaras_output_lang": source, "needs_mayura": True}
+            "saaras_output_lang": source, "needs_translation": True}
 
 
 # Mayura (default model) covers EN ↔ 10 Indic. sarvam-translate covers the
@@ -225,6 +523,114 @@ def mayura_model_for(source: str, target: str) -> str | None:
     return "sarvam-translate"
 
 
+# ── Sentence assembly ────────────────────────────────────────────────────
+#
+# Saaras emits one "final" per VAD segment, not per sentence. A speaker who
+# draws breath mid-sentence produces two finals that are each a fragment.
+# Translating a fragment is where the English goes wrong, and Gujarati makes
+# it worse than most: it is verb-final, so a fragment that stops before the
+# verb has no predicate in it at all and the translator has to guess one.
+#
+# So we hold fragments until they look like a whole sentence, then translate
+# once. That trades latency for sense — a deliberate trade for a katha, where
+# the screen is read, not conversed with. Four things end the wait:
+#
+#   1. terminal punctuation      — the sentence closed itself
+#   2. a quiet gap               — the speaker stopped; waiting buys nothing
+#   3. the total-wait cap        — a speaker in full flow yields neither of
+#                                  the above, and the hall still needs words
+#   4. the character cap         — never let one caption become a wall
+#
+# 2 and 3 are what keep it live: staleness is bounded even if the speaker
+# never pauses and Saaras never punctuates.
+
+# A closing bracket or quote may follow the stop, so look past those. A bare
+# digit before the stop (a decimal, "3.5") is not a sentence end.
+_SENTENCE_END_RE = re.compile(r'[.!?।॥][)\]"\'\u201d\u2019]*\s*$')
+
+
+class SentenceAssembler:
+    """Buffers Saaras finals until they form a whole sentence.
+
+    Every method returns either a sentence that is ready to translate, or
+    None. It holds no clock of its own — the caller passes `now`, which is
+    what lets the tests drive five minutes of katha in a millisecond.
+
+    When `enabled` is False every fragment passes straight through, which is
+    exactly the old per-utterance behaviour. That is the revert path: one
+    env var, no code change, usable at 6am on the day.
+    """
+
+    # Defaults match the module constants, which were measured on a real
+    # reading (see CAPTION_SENTENCE_* in docs/how-it-works.md). Constructing one
+    # directly must not resurrect the values that measurement disproved.
+    def __init__(self, *, max_wait_sec: float = 8.0, quiet_sec: float = 2.5,
+                 max_chars: int = 220, min_words: int = 5,
+                 enabled: bool = True) -> None:
+        self.max_wait_sec = float(max_wait_sec)
+        self.quiet_sec    = float(quiet_sec)
+        self.max_chars    = int(max_chars)
+        self.min_words    = int(min_words)
+        self.enabled      = bool(enabled)
+        self._parts: list[str] = []
+        self._first_at: float  = 0.0
+        self._last_at: float   = 0.0
+
+    @property
+    def pending(self) -> bool:
+        return bool(self._parts)
+
+    def _take(self) -> str:
+        out = " ".join(self._parts)
+        self._parts.clear()
+        return out
+
+    def add(self, text: str, now: float) -> str | None:
+        """Feed one Saaras final in. Returns a sentence when one is ready."""
+        frag = " ".join((text or "").split())
+        if not frag:
+            return None
+        if not self.enabled:
+            return frag
+        if not self._parts:
+            self._first_at = now
+        self._parts.append(frag)
+        self._last_at = now
+        joined = " ".join(self._parts)
+        # Punctuation alone is not evidence of a sentence. Saaras punctuates
+        # a VAD segment: measured on a real Vachanamrut reading, 90 of 138
+        # segments ended in a full stop and 49 of those were two words or
+        # fewer. Releasing on the stop alone would leave the fragmentation
+        # exactly as it was. Below the word floor the clock decides instead.
+        if _SENTENCE_END_RE.search(joined) and len(joined.split()) >= self.min_words:
+            return self._take()
+        if len(joined) >= self.max_chars:
+            return self._take()
+        if now - self._first_at >= self.max_wait_sec:
+            return self._take()
+        return None
+
+    def due(self, now: float) -> str | None:
+        """Called on a timer. Releases a held sentence once the speaker has
+        gone quiet, or once the total-wait cap is reached. Without this the
+        last fragment before a pause would sit unshown until the speaker
+        happened to say something else."""
+        if not self.enabled or not self._parts:
+            return None
+        if now - self._first_at >= self.max_wait_sec:
+            return self._take()
+        if now - self._last_at >= self.quiet_sec:
+            return self._take()
+        return None
+
+    def flush(self) -> str | None:
+        """Release whatever is held, unconditionally — called when the
+        session ends, so the last words of the katha are never swallowed."""
+        if not self.enabled or not self._parts:
+            return None
+        return self._take()
+
+
 def yt_lang_from_sarvam(code: str) -> str:
     """YouTube CC's `lang=` URL param accepts BCP-47; the primary subtag
     (en, gu, hi, …) is most broadly recognised on YouTube. Strip the
@@ -232,18 +638,69 @@ def yt_lang_from_sarvam(code: str) -> str:
     return (code or "en").split("-")[0] or "en"
 
 
+# 🔴 NEVER open the input device in exclusive mode.
+#
+# On Windows this tool shares one physical input with whatever else is using
+# it — at the mandir, vMix holds the mixer feed on `Line In` through WASAPI in
+# SHARED mode, and shared-mode capture alongside it is proven to work.
+# `sd.InputStream(...)` with no `WasapiSettings` is shared, which is why it
+# does. Do not add `extra_settings=sd.WasapiSettings(exclusive=True)`, and do
+# not accept a "fix" that does.
+#
+# Demonstrated on the live machine 2026-08-31: an exclusive-mode open SUCCEEDS,
+# and in succeeding it takes the device away from vMix. vMix's audio goes
+# silent, its input keeps reporting `Running` with no error anywhere, restarting
+# the input does not rebind it, and killing the offending process does not
+# release it. **It takes a full vMix restart to recover** — which mid-katha
+# means the hall and the stream lose all audio, not just captions.
+#
+# The failure is silent, survives the process that caused it, and vMix's own
+# status lies about it. Exclusive mode is a footgun with no upside here.
+
 # ── Device listing ────────────────────────────────────────────────────────────
 
 def list_audio_devices() -> list[dict]:
+    """Input devices, each labelled with the host API that reaches it.
+
+    Windows exposes the same physical input several times, once per host API,
+    under an IDENTICAL name. The mandir PC lists "Line In (Realtek(R) Audio)"
+    four times — and at the 16 kHz this tool captures at, two of those four do
+    not work: WASAPI refuses any rate but the endpoint's own 48 kHz mix format,
+    and WDM-KS opens without error and then delivers no frames at all, which is
+    worse. MME and DirectSound both work.
+
+    So an operator picking by name alone has a one-in-four chance of choosing a
+    dead entry and concluding the mixer feed is broken — five minutes before a
+    katha, with a full hall. Appending the host API is what makes the four
+    distinguishable, and `works_at_16k` says outright which ones to avoid
+    rather than leaving it to be discovered live.
+    """
     import sounddevice as sd
+    hostapis = sd.query_hostapis()
     devices = []
     for i, d in enumerate(sd.query_devices()):
-        if d["max_input_channels"] > 0:
-            devices.append({
-                "id": str(i),
-                "name": d["name"],
-                "channels": d["max_input_channels"],
-            })
+        if d["max_input_channels"] <= 0:
+            continue
+        api = ""
+        try:
+            api = hostapis[d["hostapi"]]["name"]
+        except Exception:
+            pass
+        # Ask the driver rather than guessing from the API name — this is the
+        # same check that fails at capture time, asked early enough to warn.
+        works = True
+        try:
+            sd.check_input_settings(device=i, samplerate=16000,
+                                    channels=1, dtype="int16")
+        except Exception:
+            works = False
+        devices.append({
+            "id": str(i),
+            "name": f"{d['name']} — {api}" if api else d["name"],
+            "channels": d["max_input_channels"],
+            "hostApi": api,
+            "worksAt16k": works,
+        })
     return devices
 
 
@@ -273,7 +730,15 @@ async def audio_from_file(path: str, max_seconds: float | None, chunk_ms: int = 
         await asyncio.sleep(max(0.0, nxt - time.time()))
 
 
-async def audio_from_device(device_id: str | None, chunk_ms: int = 500):
+async def audio_from_device(device_id: str | None, chunk_ms: int = 500,
+                            state: dict | None = None):
+    """Capture from an input device.
+
+    `state` is the session state dict, and is written to purely so
+    `/api/overlay-status` can report the drop count from outside. The
+    warning below is the only other place this number surfaces, and a log
+    line on an unattended mandir PC is not something anyone reads mid-katha.
+    """
     import numpy as np
     import sounddevice as sd
 
@@ -304,6 +769,8 @@ async def audio_from_device(device_id: str | None, chunk_ms: int = 500):
             except asyncio.QueueFull:
                 return
             drops["count"] += 1
+            if state is not None:
+                state["capture_queue_drops"] = drops["count"]
             now = time.time()
             if now - drops["last_warn"] > 5:
                 log.warning(
@@ -1111,6 +1578,32 @@ def apply_rules(text: str, rules: list[Rule]) -> tuple[str, list[str]]:
     return text, fired
 
 
+def apply_rules_safely(text: str, rules: list[Rule]) -> tuple[str, list[str]]:
+    """`apply_rules`, except it may never hand back nothing.
+
+    The rule pass runs AFTER `translate_line` has guaranteed a non-empty
+    caption, and it can undo that guarantee: an empty `replacement` is accepted
+    by the API and by `rules.json`, so a rule like `(".*" -> "")` erases the
+    whole line. Downstream that broadcasts `""` and the caption bar in a full
+    hall goes blank, with nothing logged on any path.
+
+    Deleting a WORD with an empty replacement is legitimate and still works.
+    Only the case that empties the ENTIRE caption is refused, and it degrades
+    to the un-corrected text rather than to nothing. Deliberately suppressing
+    an utterance is spelled "…" — the exclusion marker — which is not blank and
+    passes through untouched.
+    """
+    corrected, fired = apply_rules(text, rules)
+    if text.strip() and not corrected.strip():
+        log.warning(
+            f"rules {fired} emptied a caption — keeping the un-corrected text. "
+            f"A blank caption bar in a full hall is the one outcome with no "
+            f"recovery; check the replacement on those rules."
+        )
+        return text, []
+    return corrected, fired
+
+
 class RulesRegistry:
     """Owns the substitution rules list. Mirrors FeedRegistry: persisted to
     `rules.json`, broadcast over WS on every change, hot-reloaded in-memory
@@ -1326,7 +1819,9 @@ class SessionRecorder:
 
     def write_final(self, *, raw: str, corrected: str, rules_fired: list[str],
                     source_lang: str, target_lang: str,
-                    audio_level: float | None = None) -> None:
+                    audio_level: float | None = None,
+                    source_text: str | None = None,
+                    source_text_lang: str | None = None) -> None:
         if not self.fh: return
         self._write({
             "type":         "final",
@@ -1338,6 +1833,13 @@ class SessionRecorder:
             "source_lang":  source_lang,
             "target_lang":  target_lang,
             "audio_level":  audio_level,
+            # What the speech service actually returned, and which language it
+            # is in. On the default one-call path this is the English and
+            # `source_text_lang` says so — the Gujarati genuinely does not
+            # exist. With SARVAM_RECORD_SOURCE on it is the Gujarati, and this
+            # is the only place it is ever written down.
+            "source_text":      source_text,
+            "source_text_lang": source_text_lang,
         })
         self.final_count += 1
 
@@ -1746,8 +2248,120 @@ class VodJobRegistry:
 
 # ── Sarvam streaming loop ─────────────────────────────────────────────────────
 
+# The vendor SDK opens its WebSocket with no ping settings, so it silently
+# inherits the websockets library defaults: ping_interval=20, ping_timeout=20.
+# That means OUR client pings every 20s and hangs up if Sarvam has not ponged
+# within 20s.
+#
+# Measured 2026-08-31 against the live service: five idle sessions were opened,
+# spoken to briefly, then sent nothing. Four survived three minutes. One died
+# at 50s with `1011 internal error — "keepalive ping timeout"` — our side
+# closing the connection, not Sarvam's. That is the only failure actually
+# observed, and it is self-inflicted.
+#
+# The SDK exposes no way to configure this (`client.py` calls the connect
+# helper with only a URL and headers), so the helper is wrapped here at import
+# time. The timeout is raised rather than disabled: `ping_timeout=None` would
+# stop us ever noticing a genuinely dead connection, which trades a rare false
+# teardown for a permanent silent one. A dead TCP connection is still caught,
+# just after ~80s instead of ~40s.
+WS_PING_INTERVAL_SEC = float(os.environ.get("SARVAM_WS_PING_INTERVAL_SEC", "20"))
+WS_PING_TIMEOUT_SEC  = float(os.environ.get("SARVAM_WS_PING_TIMEOUT_SEC",  "60"))
+
+
+def _widen_sarvam_ws_ping_timeout() -> bool:
+    """Give Sarvam longer to answer a protocol ping before we hang up on it.
+
+    Returns whether the patch was applied, so a vendor SDK that changes shape
+    degrades to today's behaviour with a warning rather than an import crash.
+    """
+    try:
+        import functools
+        import sarvamai.speech_to_text_streaming.client as _stc
+        original = getattr(_stc, "websockets_client_connect", None)
+        if original is None or getattr(original, "_ping_widened", False):
+            return False
+        patched = functools.partial(original,
+                                    ping_interval=WS_PING_INTERVAL_SEC,
+                                    ping_timeout=WS_PING_TIMEOUT_SEC)
+        patched._ping_widened = True
+        _stc.websockets_client_connect = patched
+        return True
+    except Exception as e:
+        log.warning(f"Could not widen the Sarvam WebSocket ping timeout ({e!r}); "
+                    f"falling back to the library default of 20s. A rare "
+                    f"'keepalive ping timeout' disconnect becomes more likely.")
+        return False
+
+
+# Floor on the interval between two connection attempts, measured attempt-start
+# to attempt-start rather than from the end of the previous session. A session
+# that dies the instant it opens therefore still costs a full interval before
+# the next one — otherwise the clean-close path (which resets the backoff by
+# design, so a flip reconnects promptly) would spin against Sarvam's rate
+# limiter for as long as the fault lasted.
+# Clamped, not merely defaulted: #17 asked for a floor "regardless of how the
+# session ended", and a floor an operator can set to 0 is not a floor. The
+# environment can widen it, never remove it.
+RECONNECT_MIN_INTERVAL_SEC = max(
+    0.5, float(os.environ.get("RECONNECT_MIN_INTERVAL_SEC", "1.0")))
+RECONNECT_MAX_INTERVAL_SEC = 8.0
+
+# A session lasting at least this long counts as having worked, which resets
+# the reconnect backoff. Comfortably longer than the ~1s a connect-then-die
+# fault takes, and far shorter than any real stretch of katha.
+HEALTHY_SESSION_SEC = float(os.environ.get("HEALTHY_SESSION_SEC", "30"))
+
+# What a browser tab is told when nothing is capturing. `disconnected` is
+# reserved for a session that wanted a connection and hasn't got one — a
+# stopped tool is not a fault and must not paint like one.
+CONNECTION_IDLE: dict = {"type": "connection", "state": "idle", "attempt": 0,
+                         "reason": None, "retry_in_sec": None}
+
+
+def _next_backoff(current: float) -> float:
+    """Spacing after a failed attempt: never under the floor, never over the cap."""
+    return min(max(current * 1.7, RECONNECT_MIN_INTERVAL_SEC), RECONNECT_MAX_INTERVAL_SEC)
+
+
+async def _announce_connection(broadcaster: "Broadcaster", state: dict | None, link_state: str,
+                               *, attempt: int = 0, reason: str | None = None,
+                               retry_in_sec: float | None = None) -> None:
+    """Publish the state of the link to the speech service.
+
+    Kept on `state` as well as broadcast, because a broadcast only reaches the
+    tabs that are open at the time. `handle_ws` hands the stored value to each
+    tab as it connects, so one opened (or refreshed) mid-outage paints the
+    fault rather than an innocent-looking blank screen.
+    """
+    msg = {"type": "connection", "state": link_state, "attempt": attempt,
+           "reason": reason, "retry_in_sec": retry_in_sec}
+    if state is not None:
+        state["connection"] = dict(msg)
+    try:
+        await broadcaster.send(msg)
+    except Exception:
+        pass
+
+
+async def _wait_before_retry(seconds: float, stop_event: asyncio.Event) -> bool:
+    """Hold for `seconds`, or return the moment the operator presses Stop.
+
+    True means Stop fired. This is the one wait in the supervisor that runs on
+    the event loop's clock instead of `time.time()`, which is why `sarvam_loop`
+    accepts it as a parameter: a test asserting how far apart attempts are
+    spaced substitutes a version costing no wall clock. Production passes none.
+    """
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
 async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_event: asyncio.Event,
-                      state: dict, sarvam_cfg: dict | None = None, gate_cfg: dict | None = None):
+                      state: dict, sarvam_cfg: dict | None = None, gate_cfg: dict | None = None,
+                      client=None, retry_wait=None):
     """Sarvam streaming session supervisor.
 
     Reads the current (source, target) lang pair from
@@ -1755,21 +2369,52 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
     mid-session ⇆ flip or any other direction change picks up automatically.
     Stashes the live ws on `state["sarvam_ws"]` so the flip handler can
     close it to force a reconnect.
-    """
-    from sarvamai import AsyncSarvamAI
 
+    `client` is the speech-service client. Left at None — as production always
+    does — it is an `AsyncSarvamAI` built from SARVAM_API_KEY. Passing one in
+    is the seam the tests use: with a fake client the whole supervisor runs
+    with no network, no API key and no audio device. See tests/fakes.py.
+
+    `retry_wait` is the between-attempts hold, `_wait_before_retry` by default.
+    It is a parameter for the same reason: it is the only wait here that a
+    virtual clock cannot reach.
+    """
+    retry_wait = retry_wait or _wait_before_retry
     api_key = os.environ.get("SARVAM_API_KEY", "")
-    if not api_key:
+    if client is None and not api_key:
         log.error("SARVAM_API_KEY not set")
         return
+
+    # Everything /api/overlay-status reports about the input side is reset
+    # here rather than at the end of the previous run. A carried-over
+    # timestamp is the one failure mode this board exists to prevent: it
+    # would make a session that has never seen a frame read as freshly fed.
+    if state is not None:
+        state.update({
+            "capture_running":     True,
+            "capture_started_at":  time.time(),
+            "last_audio_at":       None,
+            "last_loud_audio_at":  None,
+            "last_final_at":       None,
+            "capture_queue":       None,
+            "capture_queue_max":   None,
+            "capture_queue_drops": 0,
+            "session_queue_drops": 0,
+            "input_peak":          None,
+        })
 
     # Base kwargs from the UI start payload — model + VAD knobs survive
     # across direction changes. Mode + language_code get derived per-
     # iteration from state["source"]/state["target"] so a flip / dropdown
     # change takes effect on reconnect.
     cfg = sarvam_cfg or {}
+    # Validate against SARVAM_MODEL_IDS rather than trusting the posted
+    # string outright — a browser tab with stale localStorage from before
+    # this fix could still be holding a withdrawn id (e.g. "saaras:v2").
+    requested_model = cfg.get("model")
+    model = requested_model if requested_model in SARVAM_MODEL_IDS else DEFAULT_SARVAM_MODEL
     base_kwargs = dict(
-        model                = cfg.get("model",                "saaras:v3"),
+        model                = model,
         sample_rate          = cfg.get("sample_rate",          16000),
         input_audio_codec    = cfg.get("input_audio_codec",    "pcm_s16le"),
         high_vad_sensitivity = bool(cfg.get("high_vad_sensitivity", True)),
@@ -1780,10 +2425,22 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
     gate = gate_cfg or {}
     gate_peak_threshold = float(gate.get("silence_threshold", 0.010))
     gate_hangover_sec   = float(gate.get("hangover_sec",      1.5))
+    # Interval of 0 disables the keep-alive; the switch and the interval are
+    # separate settings so an operator can turn it off without losing a tuned
+    # interval, and either can come from .env or the start payload.
+    if gate.get("keepalive", KEEPALIVE_ENABLED):
+        keepalive_sec = _resolve_keepalive_sec(
+            gate.get("keepalive_sec", KEEPALIVE_SEC), KEEPALIVE_SEC)
+    else:
+        keepalive_sec = 0.0
     log.info(f"Client silence gate: peak ≥ {gate_peak_threshold*100:.2f}% of full-scale, "
-             f"hangover {gate_hangover_sec:.2f}s")
+             f"hangover {gate_hangover_sec:.2f}s, "
+             + (f"keep-alive every {keepalive_sec:.0f}s" if keepalive_sec else "keep-alive off"))
 
-    client = AsyncSarvamAI(api_subscription_key=api_key)
+    if client is None:
+        from sarvamai import AsyncSarvamAI
+        _widen_sarvam_ws_ping_timeout()
+        client = AsyncSarvamAI(api_subscription_key=api_key)
     pp_session = aiohttp.ClientSession() if use_pp else None
     pp_id: str | None = None
     # Shared aiohttp session for Mayura POST /translate calls during en_gu
@@ -1810,11 +2467,49 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
     # and the underlying device survive.
     audio_q: asyncio.Queue = asyncio.Queue(maxsize=16)
     audio_pump_done = asyncio.Event()
+    # The pump is the last point where "audio is still arriving from the
+    # source" is a fact rather than an inference, so it is where
+    # /api/overlay-status reads it from. A stalled sender leaves the pump
+    # running, and that difference is exactly what the board has to show.
+    if state is not None:
+        state["capture_queue"]     = audio_q
+        state["capture_queue_max"] = audio_q.maxsize
     async def _audio_pump():
+        import numpy as np
+        pump_drops = 0
         try:
             async for pcm, ts in audio_gen:
                 if stop_event.is_set():
                     break
+                if state is not None:
+                    now = time.time()
+                    state["last_audio_at"] = now
+                    # 🔴 Loudness is measured HERE and not in the sender, even
+                    # though the sender already computes the same peak for the
+                    # gate. The sender only runs inside a live speech-service
+                    # session; with the link down it never runs at all, so the
+                    # board reported "nothing above the silence gate" for a
+                    # microphone that was delivering perfectly good speech —
+                    # sending the reader to the mixer for a fault that was in
+                    # the network. Found by driving the real endpoint with a
+                    # bad API key. Whether there is SOUND in the audio is a
+                    # property of the input, and must not depend on whether
+                    # anything downstream is reachable.
+                    try:
+                        peak = float(np.abs(np.frombuffer(pcm, dtype=np.int16)).max()) / 32767.0
+                        if peak >= gate_peak_threshold:
+                            state["last_loud_audio_at"] = now
+                        # Its own key, not `last_audio_level`: that one is the
+                        # sender's 250ms window, read per FINAL by the
+                        # SessionRecorder, and the board must not redefine a
+                        # recorded column. Same reason as the timestamp above
+                        # — the sender does not run with the link down, and
+                        # "how loud is the microphone" is the first question
+                        # asked when captions stop. It must still have an
+                        # answer when the link is what broke.
+                        state["input_peak"] = round(peak, 4)
+                    except Exception:
+                        pass
                 try:
                     audio_q.put_nowait((pcm, ts))
                 except asyncio.QueueFull:
@@ -1825,6 +2520,9 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
                         audio_q.put_nowait((pcm, ts))
                     except (asyncio.QueueEmpty, asyncio.QueueFull):
                         pass
+                    pump_drops += 1
+                    if state is not None:
+                        state["session_queue_drops"] = pump_drops
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1848,6 +2546,10 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
                 continue
             yield pcm, ts
 
+    def _audio_source_finished() -> bool:
+        # No point reconnecting to Sarvam if no audio will ever arrive.
+        return audio_pump_done.is_set() and audio_q.empty()
+
     # Sarvam's WS sometimes drops with `no close frame received or sent`
     # (server-side idle timeout, transient network blip). Retry the connect
     # with exponential backoff so a brief drop doesn't end the session —
@@ -1855,10 +2557,29 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
     # past the backoff cap (8 s). The audio_gen, captionText state on each
     # browser tab, and PP message id all survive across reconnects.
     import websockets.exceptions as _wse
-    backoff_sec = 0.5
+    backoff_sec = 0.0
     attempt = 0
+    last_attempt_at: float | None = None
     try:
         while not stop_event.is_set():
+            if _audio_source_finished():
+                log.warning("audio pump exited and queue is empty — ending sarvam_loop")
+                break
+
+            # Hold off until this attempt is due. Spacing is measured from the
+            # PREVIOUS attempt, so however the last session ended — clean
+            # close, drop, unexpected error — the interval is the same and no
+            # path can produce a tight retry loop.
+            if last_attempt_at is not None:
+                due_in = last_attempt_at + max(RECONNECT_MIN_INTERVAL_SEC, backoff_sec) - time.time()
+                if due_in > 0:
+                    log.info(f"Next Sarvam connection attempt in {due_in:.1f}s")
+                    if await retry_wait(due_in, stop_event):
+                        break
+                if stop_event.is_set():
+                    break
+
+            last_attempt_at = time.time()
             attempt += 1
             # Build connect_kwargs from the current (source, target) every
             # iteration. The flip / direction-change handler mutates state
@@ -1872,11 +2593,7 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
             connect_kwargs["language_code"] = pipe["sarvam_lang"]
             log.info(f"Sarvam connect kwargs (source={source!r} target={target!r}): {connect_kwargs}")
             log.info(("Re-c" if attempt > 1 else "C") + f"onnecting to Sarvam… (attempt {attempt})")
-            # Bail out early if the audio pump has died — there's no point
-            # reconnecting to Sarvam if no audio will arrive.
-            if audio_pump_done.is_set() and audio_q.empty():
-                log.warning("audio pump exited and queue is empty — ending sarvam_loop")
-                break
+            reason = "closed"
             try:
                 await _sarvam_session(
                     client, connect_kwargs, _queue_consumer(), broadcaster,
@@ -1885,37 +2602,65 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
                     source=source, target=target, pipeline=pipe,
                     mt_session=mt_session,
                     api_key=api_key, state=state,
+                    keepalive_sec=keepalive_sec,
                 )
                 if stop_event.is_set():
                     break
                 # Returned without exception (WS closed cleanly) but the
-                # operator didn't stop — could be Sarvam idle-timeout or a
-                # flip that closed the ws on purpose. Either way, reconnect
-                # immediately, not after the full backoff.
+                # operator didn't stop — could be a flip that closed the ws on
+                # purpose, or the service hanging up on us.
+                #
+                # This escalates like any other ending. A clean close is not
+                # self-evidently benign: a service that accepts a connection
+                # and immediately closes it cleanly would, if this reset to
+                # the floor, be retried once a second for as long as the fault
+                # lasted — ~3600 attempts an hour into a rate limiter, which is
+                # the exact failure the floor exists to prevent. What earns a
+                # reset is a session that actually WORKED, handled below.
                 log.info("Sarvam WS closed cleanly — reconnecting")
-                backoff_sec = 0.5
+                backoff_sec = _next_backoff(backoff_sec)
             except asyncio.CancelledError:
                 raise
             except _wse.ConnectionClosed as e:
-                log.warning(f"Sarvam WS dropped: {type(e).__name__}: {e}  "
-                            f"— reconnect in {backoff_sec:.1f}s")
+                log.warning(f"Sarvam WS dropped: {type(e).__name__}: {e}")
+                reason = "dropped"
+                backoff_sec = _next_backoff(backoff_sec)
             except Exception as e:
                 log.error(f"Sarvam session error: {e!r}", exc_info=True)
-                # Notify the operator's browser tab — the page WS status pill
-                # already shows our reconnect, but a one-line debug entry helps.
+                reason = "error"
+                backoff_sec = _next_backoff(backoff_sec)
 
-            if stop_event.is_set():
+            # A session that ran for a while did its job, so whatever ended it
+            # is a new fault rather than the last one repeating — start the
+            # backoff over. This is what keeps a deliberate direction flip
+            # cheap: a flip after an hour of katha reconnects at the floor,
+            # while a service that keeps dying on contact keeps backing off.
+            # Health is measured by how long it lasted, not by how it ended.
+            if time.time() - last_attempt_at >= HEALTHY_SESSION_SEC:
+                backoff_sec = 0.0
+
+            if stop_event.is_set() or _audio_source_finished():
                 break
 
-            # Wait for the backoff or for the operator to press Stop —
-            # whichever happens first.
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff_sec)
-                break   # stop_event fired during the wait
-            except asyncio.TimeoutError:
-                pass
-            backoff_sec = min(backoff_sec * 1.7, 8.0)
+            # The link is down, so whatever is on the hall's screen no longer
+            # matches anything being said. Blank every surface and name the
+            # fault for the operator — a stale caption is worse than none, and
+            # a blank bar they cannot explain is worse than a labelled one.
+            due_at = last_attempt_at + max(RECONNECT_MIN_INTERVAL_SEC, backoff_sec)
+            await _announce_connection(
+                broadcaster, state, "disconnected", attempt=attempt, reason=reason,
+                retry_in_sec=round(max(0.0, due_at - time.time()), 1),
+            )
+            await broadcaster.send({"type": "clear"})
     finally:
+        # First thing in the finally, deliberately: anything below can raise,
+        # and a status board still claiming to be capturing after the loop has
+        # left is the exact lie it was built to stop telling. The queue object
+        # goes with it — its depth means nothing once nothing is feeding it.
+        if state is not None:
+            state["capture_running"] = False
+            state["capture_ended_at"] = time.time()
+            state["capture_queue"] = None
         # Stop the audio pump, then close the underlying audio_gen so the
         # sd.InputStream `with` block exits cleanly. Without an explicit
         # aclose() the device stream stays alive (the `with` only exits on
@@ -1936,6 +2681,9 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
             await mt_session.close()
         except Exception:
             pass
+        # Back to idle, not disconnected: nothing is trying to connect any
+        # more, so a tab opening after this must not be shown a fault.
+        await _announce_connection(broadcaster, state, "idle")
         await broadcaster.send({"type": "stopped"})
         await broadcaster.send({"type": "clear"})
         # Clear the live-ws stash so /api/direction in a stopped state is a no-op.
@@ -1960,6 +2708,325 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
             except Exception:
                 pass
         log.info("Sarvam loop ended")
+
+
+# ── A second translator ──────────────────────────────────────────────────
+#
+# Mayura is competent at Gujarati and it is fast, but it cannot be *told*
+# anything: there is no prompt, so there is no way to say that this is a
+# Hindu devotional discourse, that કથા here is the recital of scripture and
+# not a "story", or how the swami's name is spelled. On the first live
+# sample it rendered "ભગવાનની કથાનો આરંભ કરીએ છીએ" as "the Lord" — the
+# central noun simply vanished.
+#
+# A general model can be told all of that, and told it on every line. That
+# is the entire reason for a second backend; speed is a constraint on it,
+# not the point of it. So: thinking off, temperature zero, a hard timeout,
+# and Mayura still sitting underneath as the fallback. A caption that is
+# late is worse than a caption that is merely imperfect, and a blank
+# caption bar is worse than both.
+
+GEMINI_URL_TMPL = ("https://generativelanguage.googleapis.com/v1beta/"
+                   "models/{model}:generateContent")
+
+# Owner's decision, 2026-09-01, on measured evidence: briefed Gemini scored
+# 24/24 on the passage's terminology against Mayura's 13/24, and on six
+# minutes of the speaker's own katha it produced readable English where
+# Mayura produced word-salad ("Maharaj wrote the Shikshapatri" vs
+# "Maharaja Shikshapatri is written"). Sarvam stays underneath as the
+# fallback and remains one env var away.
+# The set of translators that actually exist. An unrecognised value used to be
+# the worst kind of wrong: `derive_pipeline` read "not sarvam" and forced the
+# slow two-hop path, `translate_line` read "not gemini" and went straight to
+# Mayura, and the startup log read "not sarvam, key present" and announced
+# Gemini. One letter -- CAPTION_TRANSLATOR=gemeni -- bought the expensive
+# pipeline, delivered the cheap translator, and printed the line the mandir PC
+# uses to verify the switchover. Three readers, three different answers, no
+# complaint anywhere.
+TRANSLATORS = ("gemini", "sarvam")
+
+_requested_translator = os.environ.get("CAPTION_TRANSLATOR", "gemini").strip().lower()
+TRANSLATOR = _requested_translator if _requested_translator in TRANSLATORS else "gemini"
+
+# Deliberately NOT a hard exit. This is read at import, so a refusal would mean
+# a server that does not start -- and the mandir launches it by double-clicking
+# a .bat, where "did not start" is invisible and indistinguishable from "did
+# not work". A running server on the documented default still captions the
+# katha; a blank overlay is the one outcome with no recovery. So: correct
+# defaults, and say so loudly enough that the log cannot be misread.
+if _requested_translator not in TRANSLATORS:
+    log.error(
+        f"CAPTION_TRANSLATOR={_requested_translator!r} is not one of "
+        f"{list(TRANSLATORS)} -- almost certainly a typo in .env. "
+        f"Falling back to {TRANSLATOR!r}. Fix .env and restart to be sure "
+        f"you are getting what you asked for."
+    )
+# Read from the environment (and therefore from .env). It is never
+# written to a file in this repo — both repos are public.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+# Measured live 2026-08-31: "gemini-2.5-flash" returns 404, "no longer
+# available to new users". gemini-3.1-flash-lite answers in ~530ms and
+# accepts the thinking field; the newest Flash models were repeatedly
+# "experiencing high demand" and timed out, which is not what you want
+# in front of a hall. Revisit once #38 has scored them.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+# 2.5s was a guess and it was too tight: measured median is ~1.8s, so a
+# meaningful share of healthy calls would have timed out and been
+# answered by Mayura instead — the better translator silently absent.
+# The total end-to-end budget is #35's to set; this only stops the
+# fallback firing on calls that were going to succeed.
+GEMINI_TIMEOUT_SEC = _env_float("GEMINI_TIMEOUT_SEC", 5.0)
+# How many previously translated lines to offer as context. Enough to keep
+# pronouns and topic consistent; small enough not to cost latency.
+GEMINI_CONTEXT_LINES = int(_env_float("GEMINI_CONTEXT_LINES", 3))
+
+# The domain brief and the glossary are the two things Mayura cannot take.
+# Both live in a file the mandir can edit without touching code, because the
+# people who know that vocabulary are not the people who deploy this.
+GLOSSARY_PATH = os.environ.get("CAPTION_GLOSSARY", "glossary.json")
+
+
+def load_glossary(path: str = "") -> tuple[str, dict]:
+    """Read the domain brief and term glossary. Absent file → no opinions.
+
+    Shape:
+        {"brief":     "...",
+         "reference": "the day's passage in published English, optional",
+         "terms":     {"<source term>": "<English>", ...}}
+
+    `reference` is folded into the brief. It exists because of what a real
+    Vachanamrut reading showed: the passage's central term — શાપિત બુદ્ધિ,
+    "cursed intellect" — was misheard as શાંતિ and શાર્પ and came out as
+    "He's crazy", "He's brainwashed", "He's real smooth" and "He becomes a
+    victim", five renderings of one idea, none of them it. A glossary entry
+    cannot repair a mishearing. Telling the model what passage is being read
+    can, because it makes the right words the expected ones.
+    """
+    path = path or GLOSSARY_PATH
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return "", {}
+    except Exception as e:
+        log.warning(f"glossary {path}: {type(e).__name__}: {e} — ignoring")
+        return "", {}
+    brief = str(data.get("brief") or "").strip()
+    reference = str(data.get("reference") or "").strip()
+    if reference:
+        brief = (brief + "\n\nThe speaker is working through this passage. "
+                 "Its published English translation is below — match its "
+                 "terminology and names. Do NOT copy from it: translate what "
+                 "was actually said, which will often be the speaker's own "
+                 "words about the passage rather than the passage itself."
+                 f"\n{reference}").strip()
+    terms = data.get("terms") or {}
+    if not isinstance(terms, dict):
+        log.warning(f"glossary {path}: 'terms' is not an object — ignoring it")
+        terms = {}
+    return brief, {str(k): str(v) for k, v in terms.items()}
+
+
+# The passage this tool was built for is *about* being cursed for hurting a
+# sant or failing one's parents. Left to default thresholds that reads as
+# harassment, and a block is indistinguishable from a timeout: both return
+# nothing and silently demote to the weaker translator. Scripture is not
+# abuse, and the hall should not lose a line because a filter cannot tell.
+_GEMINI_SAFETY = [
+    {"category": c, "threshold": "BLOCK_NONE"} for c in (
+        "HARM_CATEGORY_HARASSMENT",
+        "HARM_CATEGORY_HATE_SPEECH",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "HARM_CATEGORY_DANGEROUS_CONTENT",
+    )
+]
+
+# A caption is one sentence. This only has to stop a runaway answer holding
+# the caption bar; it is not a quality knob.
+GEMINI_MAX_OUTPUT_TOKENS = int(_env_float("GEMINI_MAX_OUTPUT_TOKENS", 256))
+
+# Models that answered 400 on `thinkingConfig`. gemini-3.1-flash-lite accepts
+# it and gemini-3.5-flash-lite rejects it, so it cannot be sent blind and the
+# vendor documents no way to ask in advance. We try once, remember, move on.
+_NO_THINKING_CONFIG: set[str] = set()
+
+
+def describe_gemini_refusal(data: dict) -> str:
+    """Why an answer was unusable, in words a log reader can act on.
+
+    A safety block, a truncation and an empty response all look identical to
+    the caller — nothing comes back and Mayura answers instead. Naming them
+    apart is what makes a pattern visible over four hours.
+    """
+    try:
+        blocked = (data.get("promptFeedback") or {}).get("blockReason")
+        if blocked:
+            return f"blocked: {blocked}"
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return "no candidates"
+        finish = candidates[0].get("finishReason")
+        if finish == "SAFETY":
+            return "blocked: SAFETY"
+        if finish == "MAX_TOKENS":
+            return "truncated"
+        return f"empty ({finish})" if finish else "empty"
+    except (AttributeError, TypeError, IndexError):
+        return "unreadable"
+
+
+def build_gemini_request(text: str, *, source_lang: str, target_lang: str,
+                         brief: str = "", glossary: dict | None = None,
+                         context: list[str] | None = None,
+                         allow_thinking_config: bool = True) -> dict:
+    """The request body, built without touching the network so that what we
+    ask for can be asserted in a test.
+
+    The instruction is deliberately blunt about output shape: a caption bar
+    has no room for a model's preamble, and "Here is the translation:" on a
+    temple screen is worse than a clumsy sentence.
+    """
+    # The operator label carries a native-script suffix
+    # ("Gujarati  ગુજરાતી"); the model wants the English name only.
+    src = langname(source_lang).split("  ")[0].strip()
+    tgt = langname(target_lang).split("  ")[0].strip()
+
+    rules = [
+        f"Translate the {src} line below into {tgt}.",
+        "Output ONLY the translation. No preamble, no notes, no quotes, "
+        "no transliteration, no alternatives.",
+        "Keep proper nouns, deity names and place names as names.",
+        "Render it as a caption: natural, dignified, and short enough to "
+        "read on a screen while the speaker carries on.",
+        "If the line is incomplete, translate what is there and do not "
+        "invent an ending.",
+    ]
+    if brief:
+        rules.insert(0, f"Context: {brief}")
+    if glossary:
+        pairs = "; ".join(f"{k} = {v}" for k, v in glossary.items())
+        rules.append(f"Use these renderings for these terms: {pairs}.")
+
+    parts: list[str] = ["\n".join(rules)]
+    # The limit is checked HERE as well as at the source of the list, because
+    # `context[-0:]` is the whole list: a `GEMINI_CONTEXT_LINES` of 0 would
+    # have offered every line of the session so far, which is the opposite of
+    # what setting it to 0 asks for. Off must mean off.
+    if context and GEMINI_CONTEXT_LINES > 0:
+        prior = "\n".join(context[-GEMINI_CONTEXT_LINES:])
+        parts.append(
+            "The previous lines, already translated, for continuity of "
+            f"pronouns and topic only — do NOT translate or repeat them:\n{prior}"
+        )
+    parts.append(f"The line to translate:\n{text}")
+
+    gen: dict = {
+        "temperature": 0,
+        "candidateCount": 1,
+        "maxOutputTokens": GEMINI_MAX_OUTPUT_TOKENS,
+    }
+    if allow_thinking_config:
+        # A reasoning pass costs seconds, and a caption that arrives after
+        # the speaker has moved on is not a caption.
+        gen["thinkingConfig"] = {"thinkingBudget": 0}
+    return {
+        "contents": [{"role": "user", "parts": [{"text": "\n\n".join(parts)}]}],
+        "generationConfig": gen,
+        "safetySettings": _GEMINI_SAFETY,
+    }
+
+
+def parse_gemini_response(data: dict) -> str | None:
+    """Pull the translation out, or None meaning 'fall back'.
+
+    Every shape that is not a usable translation must return None — an empty
+    candidate list, a safety block, a truncated response. None is what makes
+    the caller try Mayura instead; anything else risks putting a stray token
+    on the hall screen.
+    """
+    try:
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return None
+        content = candidates[0].get("content") or {}
+        parts = content.get("parts") or []
+        out = "".join(p.get("text") or "" for p in parts).strip()
+    except (AttributeError, TypeError, IndexError):
+        return None
+    # Models like to wrap a translation in quotes; a caption bar does not
+    # want them.
+    if len(out) >= 2 and out[0] in "\"'\u201c" and out[-1] in "\"'\u201d":
+        out = out[1:-1].strip()
+    return out or None
+
+
+async def _gemini_translate(session: aiohttp.ClientSession, api_key: str,
+                            text: str, source_lang: str, target_lang: str,
+                            *, brief: str = "", glossary: dict | None = None,
+                            context: list[str] | None = None,
+                            model: str = "",
+                            timeout_sec: float = 0.0) -> str | None:
+    """One Gemini call. Returns None on ANY failure, so the caller falls back.
+
+    Note the contract differs from `_mayura_translate`, which returns the
+    source text on failure. Here None is meaningful: it means "I have no
+    answer, use the other backend" — and only after that does returning the
+    source text become the right thing to do.
+    """
+    if not api_key or not text:
+        return None
+    model = model or GEMINI_MODEL
+    timeout_sec = timeout_sec or GEMINI_TIMEOUT_SEC
+
+    async def attempt(allow_thinking: bool):
+        """Returns (text, retry_without_thinking)."""
+        body = build_gemini_request(
+            text, source_lang=source_lang, target_lang=target_lang,
+            brief=brief, glossary=glossary, context=context,
+            allow_thinking_config=allow_thinking)
+        async with session.post(
+            GEMINI_URL_TMPL.format(model=model),
+            json=body,
+            headers={"x-goog-api-key": api_key,
+                     "Content-Type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=timeout_sec),
+        ) as resp:
+            if resp.status != 200:
+                snippet = (await resp.text())[:200]
+                # Some models 400 on the thinking field that others require.
+                # There is no documented way to ask in advance, so we find
+                # out once per model and remember.
+                if resp.status == 400 and allow_thinking:
+                    log.info(f"Gemini {model}: 400 with thinkingConfig — "
+                             "retrying without, and remembering")
+                    return None, True
+                log.warning(f"Gemini {model}: HTTP {resp.status}: {snippet!r}")
+                return None, False
+            data = await resp.json()
+            out = parse_gemini_response(data)
+            if out is None:
+                # Name it: a safety block, a truncation and an empty answer
+                # are indistinguishable to the caller, and only the pattern
+                # over hours tells you which problem you have.
+                log.warning(f"Gemini {model}: {describe_gemini_refusal(data)} "
+                            "— falling back")
+            return out, False
+
+    try:
+        allow = model not in _NO_THINKING_CONFIG
+        out, retry = await attempt(allow)
+        if retry:
+            _NO_THINKING_CONFIG.add(model)
+            out, _ = await attempt(False)
+        return out
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        log.warning(f"Gemini: no answer within {timeout_sec:.1f}s — falling back")
+        return None
+    except Exception as e:
+        log.warning(f"Gemini: {type(e).__name__}: {e} — falling back")
+        return None
 
 
 async def _mayura_translate(session: aiohttp.ClientSession, api_key: str,
@@ -2009,6 +3076,63 @@ async def _mayura_translate(session: aiohttp.ClientSession, api_key: str,
         return text
 
 
+def effective_translator(gemini_key: str = "") -> str:
+    """Which rung `translate_line` will actually try first, given the key it has.
+
+    Exists so that no log line has to re-derive it. The configured value and the
+    reachable one are not the same thing: CAPTION_TRANSLATOR=gemini with an empty
+    GEMINI_API_KEY means Gemini is never attempted, and because it is never
+    attempted the per-line "falling back to Mayura" never prints either. A label
+    reading "gemini" over Mayura's captions, with zero fallbacks logged, is the
+    exact shape of the bug this whole change set exists to remove.
+    """
+    if TRANSLATOR == "gemini" and (gemini_key or GEMINI_API_KEY):
+        return "gemini"
+    return "sarvam"
+
+
+async def translate_line(session: aiohttp.ClientSession, text: str, *,
+                         source_lang: str, target_lang: str,
+                         sarvam_key: str = "", gemini_key: str = "",
+                         brief: str = "", glossary: dict | None = None,
+                         context: list[str] | None = None,
+                         mayura_model: str | None = None) -> str:
+    """Translate one line. Best backend first; never returns nothing.
+
+    The order is the whole point. Gemini can be told what this event is and
+    what its vocabulary means, so it goes first when configured. Mayura sits
+    underneath because it is fast and always there, and Mayura's own last
+    resort is to hand back the source text. Three rungs, and the bottom one
+    still puts words on the screen — a blank caption bar in a full hall is
+    the one outcome with no recovery.
+    """
+    if TRANSLATOR == "gemini" and gemini_key:
+        out = await _gemini_translate(
+            session, gemini_key, text,
+            source_lang=source_lang, target_lang=target_lang,
+            brief=brief, glossary=glossary, context=context,
+        )
+        # Same reason as the door below: whitespace is truthy and blank.
+        # A model that answers with a space has not answered.
+        if (out or "").strip():
+            return out.strip()
+        log.info("Gemini gave no answer — falling back to Mayura for this line")
+    out = await _mayura_translate(
+        session, sarvam_key, text,
+        source_lang=source_lang, target_lang=target_lang, model=mayura_model,
+    )
+    # The promise in the docstring is kept HERE, not delegated. It used to rest
+    # entirely on _mayura_translate remembering to `return text` in each of its
+    # three failure paths; changing any one of them to return the empty string
+    # left all 101 tests passing and put a blank bar in front of the hall.
+    # A total function should be total at its own door.
+    #
+    # `.strip()` matters and is not tidying: a whitespace-only answer is
+    # truthy in Python and blank on a screen. Truthiness is the wrong test
+    # for "did the hall get words".
+    return (out or "").strip() or text
+
+
 async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                           broadcaster: "Broadcaster",
                           pp_session, pp_id: str | None,
@@ -2021,14 +3145,15 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                           pipeline: dict | None = None,
                           mt_session: aiohttp.ClientSession | None = None,
                           api_key: str = "",
-                          state: dict | None = None) -> None:
+                          state: dict | None = None,
+                          keepalive_sec: float = 0.0) -> None:
     """One Sarvam WebSocket session. Returns when WS closes cleanly or when
     stop_event is set. Raises websockets.exceptions.ConnectionClosed (or
     other) when the WS dies unexpectedly — the outer reconnect loop in
     sarvam_loop catches that and retries.
 
     Pipeline:
-        if pipeline.needs_mayura:
+        if pipeline.needs_translation:
             Saaras returns text in pipeline.saaras_output_lang; the receive
             loop then fans out a Mayura call per unique target language
             needed (display + every enabled feed) in parallel and broadcasts
@@ -2042,7 +3167,7 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
     import websockets.exceptions as _wse
     pipe        = pipeline or derive_pipeline(source, target)
     saaras_out  = pipe["saaras_output_lang"]
-    needs_mt    = pipe["needs_mayura"]
+    needs_mt    = pipe["needs_translation"]
     if mt_session is None or not api_key:
         # Without a Mayura session we can only do display targets that match
         # the Saaras output language. Log loudly so the operator sees no-MT
@@ -2064,6 +3189,251 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
             await broadcaster.send({"type": "reconnected", "attempt": attempt})
         except Exception:
             pass
+        await _announce_connection(broadcaster, state, "connected", attempt=attempt)
+
+        # The brief and glossary are read once per session, so the mandir
+        # can edit glossary.json between sessions and have it take effect on
+        # the next start without a restart of anything else.
+        brief, glossary = load_glossary()
+        # Always say which translator is REALLY in the path, not which one was
+        # asked for. The two came apart once already — the switch was set and
+        # the pipeline never called the translator at all — and the captions
+        # looked plausible throughout, so nothing on screen gave it away.
+        if TRANSLATOR == "sarvam":
+            log.info("Translator: Sarvam"
+                     + (" (Mayura, two-hop)" if needs_mt else " (Saaras one-call)"))
+        elif not GEMINI_API_KEY:
+            log.warning(f"Translator: {TRANSLATOR} was requested but there is no "
+                        "GEMINI_API_KEY — every line will come from Mayura")
+        elif not needs_mt:
+            log.error(f"Translator: {TRANSLATOR} was requested but this direction "
+                      "needs no separate translate step, so it will NOT be used")
+        else:
+            log.info(f"Translator: Gemini {GEMINI_MODEL}, Mayura underneath"
+                     + (f", {len(glossary)} glossary terms" if glossary else ", NO glossary")
+                     + (", passage reference loaded" if "published English" in brief else ""))
+        # The last few English lines, offered to the model for continuity of
+        # pronouns and topic. Display target only.
+        recent_lines: list[str] = []
+
+        # ── Sentence assembly ────────────────────────────────────────
+        # Saaras hands us one final per VAD segment, which is not the same
+        # thing as a sentence. `assembler` holds the fragments; whatever it
+        # releases is what actually gets translated and shown.
+        assembler = SentenceAssembler(
+            max_wait_sec = SENTENCE_MAX_WAIT_SEC,
+            quiet_sec    = SENTENCE_QUIET_SEC,
+            max_chars    = SENTENCE_MAX_CHARS,
+            min_words    = SENTENCE_MIN_WORDS,
+            enabled      = SENTENCE_MODE,
+        )
+
+        async def _emit_sentence(text: str) -> None:
+            """Translate one assembled sentence and push it to every surface.
+
+            Called from two places — the message loop, when a sentence
+            closes itself, and the audio sender, when the speaker stops
+            talking mid-sentence. Both paths must produce identical output,
+            which is why this is one function and not two code paths.
+            """
+            # ── Multi-target fan-out ─────────────────────────────
+            # The display wants `target`; each enabled feed wants
+            # its own target_lang. Saaras returned text in
+            # `saaras_out`. For every UNIQUE wanted language we
+            # need a Mayura call (skipping the one that matches
+            # saaras_out — that's a free passthrough).
+            registry = state.get("feed_registry") if state else None
+            feed_targets: set[str] = set()
+            if registry is not None:
+                for f in registry.enabled():
+                    if f.target_lang in SARVAM_LANG_CODES:
+                        feed_targets.add(f.target_lang)
+            wanted = {target} | feed_targets
+            wanted.discard(saaras_out)   # saaras_out is free
+
+            # One translate call per wanted language, in parallel. Not
+            # bounded: `wanted` is the set of distinct target languages, so
+            # it is as wide as the number of enabled feeds — single digits.
+            translated: dict[str, str] = {saaras_out: text}
+            if wanted and not mt_disabled:
+                t_mt = time.time()
+                async def _do_one(tgt: str) -> tuple[str, str]:
+                    out = await translate_line(
+                        mt_session, text,
+                        source_lang=saaras_out, target_lang=tgt,
+                        sarvam_key=api_key, gemini_key=GEMINI_API_KEY,
+                        brief=brief, glossary=glossary,
+                        # Only the display target gets continuity context;
+                        # a feed in another language has its own thread of
+                        # meaning and would be confused by English lines.
+                        context=recent_lines if tgt == target else None,
+                        mayura_model=mayura_model_for(saaras_out, tgt),
+                    )
+                    return tgt, out
+                # return_exceptions=True is load-bearing. With it False, one
+                # raise anywhere in a fan-out task propagated to _publish, whose
+                # only done-callback is in_flight.discard -- so nothing was ever
+                # broadcast and the hall kept the PREVIOUS caption. A stale line
+                # is the worst outcome this project has: it is confidently wrong
+                # and nothing on screen says so.
+                wanted_list = list(wanted)
+                results = await asyncio.gather(
+                    *( _do_one(t) for t in wanted_list ),
+                    return_exceptions=True,
+                )
+                for tgt, res in zip(wanted_list, results):
+                    if isinstance(res, asyncio.CancelledError):
+                        raise res          # shutdown must still cut through
+                    if isinstance(res, BaseException):
+                        log.warning(f"translate for {tgt} raised "
+                                    f"{type(res).__name__}: {res} — using source text")
+                        translated[tgt] = text
+                    else:
+                        _tgt, out = res
+                        translated[tgt] = out or text
+                mt_ms = (time.time() - t_mt) * 1000
+                # Name the translator that was actually asked, not a fixed
+                # string. This line said "Mayura" whichever rung answered, and
+                # it cost real time: the mandir PC saw "Mayura" at Gemini
+                # latencies, with zero fallbacks logged, and reasonably
+                # concluded the briefed translator might not be in the path at
+                # all -- during a katha. A label is not evidence, and this one
+                # was actively misleading.
+                log.info(f"translate fan-out ({effective_translator(GEMINI_API_KEY)}) "
+                         f"→ {sorted(wanted)} in {mt_ms:.0f}ms total")
+            elif wanted:
+                # No Mayura available — substitute source text so
+                # downstream still gets something.
+                for t in wanted: translated[t] = text
+
+            # ── Post-translate rule pass ─────────────────────────
+            # Apply substitution rules to each target's output
+            # before any downstream surface sees it. Rules are
+            # whole-word case-insensitive by default; longer
+            # phrases beat shorter ones; exclusion (replacement
+            # == "…") masks a word without dropping the
+            # utterance. The same rule set runs against every
+            # target so the LED wall, PP, YouTube CC tracks, and
+            # Pi displays stay consistent.
+            #
+            # We keep `raw_by_target` alongside the translated
+            # dict so the operator UI can show a badge with the
+            # pre-rules text. `translated[target]` gets
+            # overwritten to the corrected text (that's what
+            # downstream surfaces use).
+            raw_by_target: dict[str, str] = dict(translated)
+            rules_reg: "RulesRegistry | None" = state.get("rules_registry") if state else None
+            active_rules = rules_reg.all() if rules_reg is not None else []
+            fired_by_target: dict[str, list[str]] = {}
+            for tgt_lang in list(translated.keys()):
+                corrected, fired = apply_rules_safely(
+                    translated[tgt_lang], active_rules)
+                translated[tgt_lang]     = corrected
+                fired_by_target[tgt_lang] = fired
+
+            display_corrected = translated.get(target, text)
+            # Feed the next line's context. Bounded, and it holds the
+            # corrected text — the rules are part of what the hall saw.
+            recent_lines.append(display_corrected)
+            # Cut computed rather than written as `[:-GEMINI_CONTEXT_LINES]`,
+            # which trims nothing at 0 (-0 is 0, so the slice is empty) and so
+            # let the list grow for the whole of a 28-hour katha.
+            del recent_lines[:max(0, len(recent_lines) - GEMINI_CONTEXT_LINES)]
+            display_raw       = raw_by_target.get(target, text)
+            display_fired     = fired_by_target.get(target, [])
+            fired_labels      = [rules_reg.label_for(rid) for rid in display_fired] if rules_reg else []
+
+            await broadcaster.send({
+                "type":        "final",
+                "text":        display_corrected,
+                "raw":         display_raw,
+                "rules_fired": fired_labels,
+                "target_lang": yt_lang_from_sarvam(target),
+            })
+            if state is not None:
+                state["last_final_at"] = time.time()
+
+            # Per-feed routing: each enabled feed gets its own
+            # target's text. FINALs only — partials are
+            # LED-wall-only by design.
+            if registry is not None:
+                for f in registry.enabled():
+                    feed_text = translated.get(f.target_lang, text)
+                    f.pusher.submit(feed_text)
+
+            if pp_session and pp_id:
+                await push_to_pp(pp_session, pp_id, display_corrected)
+
+            # Storage: record raw + corrected + which rules
+            # fired so the SRT export and forensic audit can
+            # use whichever text they need.
+            recorder: "SessionRecorder | None" = state.get("session_recorder") if state else None
+            if recorder is not None and recorder.is_active():
+                recorder.write_final(
+                    raw          = display_raw,
+                    corrected    = display_corrected,
+                    rules_fired  = display_fired,
+                    source_lang  = source,
+                    target_lang  = target,
+                    audio_level  = state.get("last_audio_level") if state else None,
+                    source_text      = text,
+                    source_text_lang = saaras_out,
+                )
+
+        # ── Handing a sentence off ───────────────────────────────────
+        # Translating goes over the network. The audio sender must NEVER wait
+        # on the network: the capture queue holds about four seconds and
+        # drops the OLDEST frame when it overflows, so a stalled sender
+        # discards speech before it was ever transcribed — absent from the
+        # record, with nothing in the output showing a gap. Measured at 3.5s
+        # of lost audio against a 7.5s translate (see the test named for it).
+        #
+        # So nothing awaits the emitter inline. Each release starts its own
+        # short-lived task, and a lock keeps them in the order they were
+        # spoken — a late caption is a small fault, a caption that overtakes
+        # the sentence before it is a confusing one.
+        #
+        # Deliberately NOT a long-lived consumer task. One was tried twice
+        # (a ticker, then a queue-and-publisher) and both perturbed the event
+        # loop's ready queue enough to delay the message loop's discovery of
+        # a dropped connection. A task that exists only while a caption is in
+        # flight costs nothing when nothing is being said.
+        publish_lock = asyncio.Lock()
+        in_flight: set[asyncio.Task] = set()
+
+        async def _publish(text: str) -> None:
+            async with publish_lock:
+                await _emit_sentence(text)
+
+        def _publish_finished(task: "asyncio.Task") -> None:
+            """Retire the task AND say something if it died.
+
+            `in_flight.discard` alone never retrieved the exception, so a raise
+            anywhere in the publish stage produced silence: nothing broadcast,
+            the PREVIOUS caption left frozen on the hall screen, and an
+            operator debug panel that still looked like a healthy session. The
+            translate step is now guarded per target, but everything after it
+            — the label, the feed loop, ProPresenter, the recorder — can still
+            raise, and a stale caption that reports itself is far cheaper to
+            diagnose than one that does not.
+            """
+            in_flight.discard(task)
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                log.error(
+                    f"publishing a caption raised {type(exc).__name__}: {exc} — "
+                    f"nothing was broadcast, so the hall is still showing the "
+                    f"previous line",
+                    exc_info=exc,
+                )
+
+        def _hand_off(text: str) -> None:
+            """Start publishing a sentence. Never blocks, never awaits."""
+            task = asyncio.create_task(_publish(text), name="publish-caption")
+            in_flight.add(task)
+            task.add_done_callback(_publish_finished)
 
         async def sender():
             import numpy as np
@@ -2075,13 +3445,27 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
             HANGOVER_SEC   = gate_hangover_sec
             LEVEL_BROADCAST_HZ = 4   # ~250 ms cadence to the meter
 
-            sent, skipped, slow_sends = 0, 0, 0
+            sent, skipped, slow_sends, keepalives = 0, 0, 0, 0
             last_report = time.time()
             last_active = 0.0
+            # The connection is fresh, so it is idle from now — not from the
+            # last time we sent audio on some previous one.
+            last_sent = time.time()
+            silent_frame = b""
             first_send_logged = False
             silence_streak_logged = False
             level_peak = 0.0
             last_level_broadcast = 0.0
+
+            async def send_frame(payload: bytes) -> None:
+                # Per-message `encoding` is a pydantic literal that only
+                # accepts "audio/wav". The real codec is at connect-time.
+                await ws.transcribe(
+                    audio=base64.b64encode(payload).decode(),
+                    encoding="audio/wav",
+                    sample_rate=16000,
+                )
+
             async for pcm, _ in audio_gen:
                 if stop_event.is_set():
                     break
@@ -2091,6 +3475,21 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                     level_peak = peak
 
                 now = time.time()
+
+                # The audio frames ARE the heartbeat for sentence assembly.
+                # A held sentence must be released when the speaker stops,
+                # and the message loop cannot do it: that loop only wakes
+                # when Sarvam sends something, and a speaker who has stopped
+                # generates nothing to wake it. Frames keep arriving whether
+                # or not anyone is speaking, so checking here needs no timer
+                # of its own. (A dedicated ticker task was tried and
+                # reverted — an extra task in the ready queue measurably
+                # delayed the message loop's discovery of a dropped
+                # connection, which is a worse fault than a late caption.)
+                released = assembler.due(now=now)
+                if released:
+                    _hand_off(released)
+
                 if now - last_level_broadcast >= (1.0 / LEVEL_BROADCAST_HZ):
                     try:
                         await broadcaster.send({"type": "level", "peak": level_peak})
@@ -2110,11 +3509,27 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                     silence_streak_logged = False
                 if now - last_active > HANGOVER_SEC:
                     skipped += 1
+                    if keepalive_sec and now - last_sent >= keepalive_sec:
+                        # A frame of digital silence, same geometry as the one
+                        # we just gated. Holds the connection open without
+                        # giving Sarvam anything to transcribe.
+                        if len(silent_frame) != len(pcm):
+                            silent_frame = bytes(len(pcm))
+                        try:
+                            await send_frame(silent_frame)
+                        except Exception as e:
+                            log.error(f"sender: keep-alive ws.transcribe() raised: {e!r}")
+                            raise
+                        last_sent = now
+                        keepalives += 1
                     if not silence_streak_logged and last_active and (now - last_active) > 10:
+                        held = (f" Connection held open by a keep-alive every "
+                                f"{keepalive_sec:.0f}s." if keepalive_sec else "")
                         log.warning(
                             f"sender: 10s of silence — last loud chunk was "
                             f"{now - last_active:.0f}s ago. Mic gain too low? "
                             f"Threshold = {PEAK_THRESHOLD*100:.1f}% of full-scale."
+                            + held
                         )
                         silence_streak_logged = True
                     continue
@@ -2124,16 +3539,11 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                     log.info(f"sender: got chunk 1 ({len(pcm)} bytes, peak={peak*100:.1f}%) → ws.transcribe()")
                 t_pre = time.time()
                 try:
-                    # Per-message `encoding` is a pydantic literal that only
-                    # accepts "audio/wav". The real codec is at connect-time.
-                    await ws.transcribe(
-                        audio=base64.b64encode(pcm).decode(),
-                        encoding="audio/wav",
-                        sample_rate=16000,
-                    )
+                    await send_frame(pcm)
                 except Exception as e:
                     log.error(f"sender: ws.transcribe() raised on chunk {sent}: {e!r}")
                     raise
+                last_sent = now
                 dt = time.time() - t_pre
                 if not first_send_logged:
                     log.info(f"sender: chunk 1 acknowledged by SDK in {dt*1000:.0f}ms")
@@ -2145,9 +3555,10 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                     total = sent + skipped
                     pct   = (skipped / total * 100) if total else 0
                     log.info(f"sender: sent {sent}, skipped {skipped} silent "
-                             f"({pct:.0f}% saved) in last {now-last_report:.1f}s "
+                             f"({pct:.0f}% saved, {keepalives} keep-alive) in last "
+                             f"{now-last_report:.1f}s "
                              f"(slow_sends={slow_sends}, last_dt={dt*1000:.0f}ms)")
-                    sent, skipped, slow_sends, last_report = 0, 0, 0, now
+                    sent, skipped, slow_sends, keepalives, last_report = 0, 0, 0, 0, now
             log.info("sender: audio_gen exhausted / stopped, flushing")
             try:
                 await ws.flush()
@@ -2202,107 +3613,11 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                         dur = (inner.get("metrics") or {}).get("audio_duration")
                         suffix = f"  [{dur:.2f}s]" if isinstance(dur, (int, float)) else ""
                         log.info(f"FINAL  ▶ {text}{suffix}")
-                        # ── Multi-target fan-out ─────────────────────────────
-                        # The display wants `target`; each enabled feed wants
-                        # its own target_lang. Saaras returned text in
-                        # `saaras_out`. For every UNIQUE wanted language we
-                        # need a Mayura call (skipping the one that matches
-                        # saaras_out — that's a free passthrough).
-                        registry = state.get("feed_registry") if state else None
-                        feed_targets: set[str] = set()
-                        if registry is not None:
-                            for f in registry.enabled():
-                                if f.target_lang in SARVAM_LANG_CODES:
-                                    feed_targets.add(f.target_lang)
-                        wanted = {target} | feed_targets
-                        wanted.discard(saaras_out)   # saaras_out is free
-
-                        # Parallel Mayura calls — limit to ≤ 8 concurrent to
-                        # avoid hammering the API on rare wide fan-outs.
-                        translated: dict[str, str] = {saaras_out: text}
-                        if wanted and not mt_disabled:
-                            t_mt = time.time()
-                            async def _do_one(tgt: str) -> tuple[str, str]:
-                                out = await _mayura_translate(
-                                    mt_session, api_key, text,
-                                    source_lang=saaras_out, target_lang=tgt,
-                                    model=mayura_model_for(saaras_out, tgt),
-                                )
-                                return tgt, out
-                            results = await asyncio.gather(
-                                *( _do_one(t) for t in wanted ),
-                                return_exceptions=False,
-                            )
-                            for tgt, out in results:
-                                translated[tgt] = out
-                            mt_ms = (time.time() - t_mt) * 1000
-                            log.info(f"Mayura fan-out → {sorted(wanted)} in {mt_ms:.0f}ms total")
-                        elif wanted:
-                            # No Mayura available — substitute source text so
-                            # downstream still gets something.
-                            for t in wanted: translated[t] = text
-
-                        # ── Post-translate rule pass ─────────────────────────
-                        # Apply substitution rules to each target's output
-                        # before any downstream surface sees it. Rules are
-                        # whole-word case-insensitive by default; longer
-                        # phrases beat shorter ones; exclusion (replacement
-                        # == "…") masks a word without dropping the
-                        # utterance. The same rule set runs against every
-                        # target so the LED wall, PP, YouTube CC tracks, and
-                        # Pi displays stay consistent.
-                        #
-                        # We keep `raw_by_target` alongside the translated
-                        # dict so the operator UI can show a badge with the
-                        # pre-rules text. `translated[target]` gets
-                        # overwritten to the corrected text (that's what
-                        # downstream surfaces use).
-                        raw_by_target: dict[str, str] = dict(translated)
-                        rules_reg: "RulesRegistry | None" = state.get("rules_registry") if state else None
-                        active_rules = rules_reg.all() if rules_reg is not None else []
-                        fired_by_target: dict[str, list[str]] = {}
-                        for tgt_lang in list(translated.keys()):
-                            corrected, fired = apply_rules(translated[tgt_lang], active_rules)
-                            translated[tgt_lang]     = corrected
-                            fired_by_target[tgt_lang] = fired
-
-                        display_corrected = translated.get(target, text)
-                        display_raw       = raw_by_target.get(target, text)
-                        display_fired     = fired_by_target.get(target, [])
-                        fired_labels      = [rules_reg.label_for(rid) for rid in display_fired] if rules_reg else []
-
-                        await broadcaster.send({
-                            "type":        "final",
-                            "text":        display_corrected,
-                            "raw":         display_raw,
-                            "rules_fired": fired_labels,
-                            "target_lang": yt_lang_from_sarvam(target),
-                        })
-
-                        # Per-feed routing: each enabled feed gets its own
-                        # target's text. FINALs only — partials are
-                        # LED-wall-only by design.
-                        if registry is not None:
-                            for f in registry.enabled():
-                                feed_text = translated.get(f.target_lang, text)
-                                f.pusher.submit(feed_text)
-
-                        if pp_session and pp_id:
-                            await push_to_pp(pp_session, pp_id, display_corrected)
-
-                        # Storage: record raw + corrected + which rules
-                        # fired so the SRT export and forensic audit can
-                        # use whichever text they need.
-                        recorder: "SessionRecorder | None" = state.get("session_recorder") if state else None
-                        if recorder is not None and recorder.is_active():
-                            recorder.write_final(
-                                raw          = display_raw,
-                                corrected    = display_corrected,
-                                rules_fired  = display_fired,
-                                source_lang  = source,
-                                target_lang  = target,
-                                audio_level  = state.get("last_audio_level") if state else None,
-                            )
+                        # Hold the fragment until it is a whole sentence.
+                        # See SentenceAssembler at module top for why.
+                        ready = assembler.add(text, now=time.time())
+                        if ready:
+                            _hand_off(ready)
                     else:
                         log.info(f"sarvam: empty data msg — inner={inner}")
                 elif envelope == "events":
@@ -2322,6 +3637,23 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                     msg_counts[envelope] = msg_counts.get(envelope, 0) + 1
                     log.info(f"sarvam: unknown envelope={envelope!r} d={d}")
         finally:
+            # Say the last words of the katha. A session that ends while a
+            # sentence is still being assembled must not swallow it.
+            tail = assembler.flush()
+            if tail:
+                _hand_off(tail)
+            # Let anything still in flight finish, so the last words of the
+            # katha are actually said — but never hang the shutdown on a
+            # wedged translator.
+            if in_flight:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*in_flight, return_exceptions=True),
+                        timeout=SENTENCE_DRAIN_SEC)
+                except (asyncio.TimeoutError, Exception):
+                    log.warning("gave up waiting for captions still publishing")
+                for task in list(in_flight):
+                    task.cancel()
             # Always tidy up the sender on session exit (clean close or raise).
             if not sender_task.done():
                 sender_task.cancel()
@@ -2350,6 +3682,7 @@ async def handle_config(request: web.Request):
         "defaultTarget": DEFAULT_TARGET_LANG,
         "sarvamLangs":   [list(p) for p in SARVAM_LANGS],
         "mayuraLangs":   sorted(MAYURA_LANGS),
+        "sarvamModels":  SARVAM_MODELS,
     })
 
 
@@ -2441,7 +3774,7 @@ async def handle_start(request: web.Request):
             return web.Response(status=400, text=f"File not found: {file}")
         audio_gen = audio_from_file(file, seconds)
     else:
-        audio_gen = audio_from_device(device)
+        audio_gen = audio_from_device(device, state=state)
 
     stop_event = asyncio.Event()
     state["stop_event"] = stop_event
@@ -2697,6 +4030,14 @@ async def handle_ws(request: web.Request):
             "device":       state.get("device"),
             "file":         state.get("file"),
         }))
+    except Exception:
+        pass
+    # Snapshot the speech-service link state. A broadcast only reaches the
+    # tabs that were open when it went out, so without this a tab opened —
+    # or refreshed — during an outage would show an empty caption bar and no
+    # reason for it, which is exactly the ambiguity this state exists to end.
+    try:
+        await ws.send_str(json.dumps(state.get("connection") or CONNECTION_IDLE))
     except Exception:
         pass
     # Snapshot the current YouTube CC feeds so a fresh tab paints the
@@ -3226,6 +4567,320 @@ async def handle_upload_audio(request: web.Request):
     })
 
 
+# What each caption surface says it is doing, keyed by the id it reports.
+#
+# 🔴 This exists because the overlay runs inside vMix's browser input on an
+# unattended machine in Bolton, where NOBODY CAN OPEN DEVTOOLS. The overlay
+# publishes its state as a DOM attribute, which is readable from a browser and
+# useless from a terminal — so the one question worth asking of a hall screen,
+# "what do you think you are showing right now?", had no answer from outside.
+#
+# Asked for by the mandir PC after it deployed and could not report the numbers
+# back: "if it were also emitted to the server log or exposed on an HTTP
+# endpoint I could report it from here."
+#
+# Bounded, and last-write-wins per surface: this is a status board, not a log.
+_overlay_reports: dict[str, dict] = {}
+MAX_OVERLAY_REPORTS = 16
+
+# Past this, capture has stopped being fed at all: the device has gone, been
+# taken by another process, or lost its permission. Frames arrive every 500 ms,
+# so ten missed frames is not a hiccup.
+CAPTURE_STALLED_AFTER_SEC = 5.0
+
+# Past this, audio is arriving but none of it is above the silence gate. A
+# katha contains long deliberate pauses, so this is set well beyond any of
+# them — the fault it names is a dead or muted mixer feed, which delivers a
+# flawless stream of digital silence and leaves every other counter healthy.
+CAPTURE_SILENT_AFTER_SEC = 30.0
+
+# Past this, captions have stopped reaching the hall even though audio is
+# still being captured — the speech-service link, the translator or the
+# publish path. The capture side is not at fault, so the verdict does not
+# change; `why` names it, because a 37-second gap with nobody able to say why
+# is what this endpoint was widened for.
+CAPTION_GAP_WORTH_NAMING_SEC = 20.0
+
+# Past this, a surface is no longer describing anything that exists.
+#
+# 🔴 Reported by the mandir PC: it closed its test browser and the surface kept
+# listing, correctly aged — but its `budget` and `opacity` still read exactly
+# like live values. `age_sec` alone makes the reader know the threshold and do
+# the arithmetic; someone glancing at a status board under time pressure will
+# not. Surfaces report every 5s, so three missed reports is dead.
+OVERLAY_STALE_AFTER_SEC = 15.0
+
+
+async def handle_overlay_report(request: web.Request):
+    """POST /api/overlay-report — a caption surface publishing its own state.
+
+    Fire-and-forget from the browser's point of view. It must never be able to
+    take a caption surface down, so every failure here is swallowed into a 200:
+    a diagnostics channel that can break the thing it reports on is worse than
+    no diagnostics channel.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "reason": "unparseable"})
+
+    surface = str(body.get("surface") or "unknown")[:64]
+    if surface not in _overlay_reports and len(_overlay_reports) >= MAX_OVERLAY_REPORTS:
+        # A page that reloads with a fresh id each time must not grow this
+        # without bound. Drop the oldest.
+        oldest = min(_overlay_reports, key=lambda k: _overlay_reports[k].get("at", 0))
+        _overlay_reports.pop(oldest, None)
+
+    # `shown` is the SEQUENCE of lines that reached the screen; `on_screen` is
+    # only the latest. The board reports every 5s and a line changes every ~2s,
+    # so a snapshot alone cannot answer "did the whole sentence appear, and in
+    # order?" — it will always miss some of them.
+    shown = body.get("shown") or []
+    if not isinstance(shown, list):
+        shown = []
+
+    # 🔴 The lines are kept SEPARATE as well as joined. `on_screen` reads as one
+    # sentence, which is what a person wants; but the claim this whole display
+    # makes is that a WHOLE line moves up at a time, and a joined string cannot
+    # be used to check it — two lines and one long line look identical. The
+    # reader diagnosing a half-line on the hall screen needs the boundaries.
+    on_screen_lines = body.get("onScreenLines") or []
+    if not isinstance(on_screen_lines, list):
+        on_screen_lines = []
+
+    _overlay_reports[surface] = {
+        "at":              time.time(),
+        "state":           body.get("state") or {},
+        "on_screen":       str(body.get("onScreen") or "")[:400],
+        "on_screen_lines": [str(x)[:200] for x in on_screen_lines[:8]],
+        "shown":           [str(x)[:200] for x in shown[-12:]],
+    }
+    return web.json_response({"ok": True})
+
+
+def _sec_ago(at: float | None, now: float) -> float | None:
+    """Seconds since `at`, or None if it never happened.
+
+    A raw epoch timestamp is not an answer to anyone reading this JSON on a
+    phone at the back of a mandir, and the arithmetic is exactly what a
+    person under time pressure gets wrong. Clamped at zero because a clock
+    that has stepped backwards must not report a negative age as if it meant
+    something.
+    """
+    if at is None:
+        return None
+    try:
+        return round(max(0.0, now - float(at)), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _queue_depth(q) -> int | None:
+    """How many audio chunks are waiting. None when there is no queue."""
+    try:
+        return int(q.qsize())
+    except Exception:
+        return None
+
+
+def _describe_capture(state: dict | None, now: float) -> tuple[dict, str, str]:
+    """The input side of the pipeline: (capture block, verdict, why).
+
+    🔴 The caption surfaces can only report what they were GIVEN. If the
+    overlay is healthy and the audio has stopped, every field on the surface
+    side reads fine and the hall still has no subtitles — that is how a
+    37-second caption gap once went undiagnosed from outside. This is the
+    half of the board that can tell those two apart.
+    """
+    state = state if isinstance(state, dict) else {}
+
+    task      = state.get("caption_task")
+    task_done = bool(task is not None and getattr(task, "done", lambda: False)())
+    running   = bool(state.get("capture_running")) and not task_done
+
+    started_at   = state.get("capture_started_at")
+    last_audio   = state.get("last_audio_at")
+    last_loud    = state.get("last_loud_audio_at")
+    last_final   = state.get("last_final_at")
+    audio_ago    = _sec_ago(last_audio, now)
+    loud_ago     = _sec_ago(last_loud,  now)
+    final_ago    = _sec_ago(last_final, now)
+
+    conn = state.get("connection")
+    conn = conn if isinstance(conn, dict) else {}
+
+    device_drops  = state.get("capture_queue_drops") or 0
+    session_drops = state.get("session_queue_drops") or 0
+
+    capture = {
+        "running":                 running,
+        "audio_source":            state.get("audio_source"),
+        "device":                  state.get("device"),
+        "file":                    state.get("file"),
+        "source_lang":             state.get("source"),
+        "target_lang":             state.get("target"),
+        "running_for_sec":         _sec_ago(started_at, now) if running else None,
+        "stopped_sec_ago":         None if running else _sec_ago(state.get("capture_ended_at"), now),
+        "link_state":              conn.get("state"),
+        "link_reason":             conn.get("reason"),
+        "last_audio_sec_ago":      audio_ago,
+        "last_loud_audio_sec_ago": loud_ago,
+        "last_final_sec_ago":      final_ago,
+        # The pump's reading first — it is the only one that survives a link
+        # outage. The sender's falls back in for a file replay, where there
+        # is no device pump. Written as an explicit None test because the
+        # pump resets the key to None at every session start, so `.get` with
+        # a default would return that None and never reach the fallback, and
+        # a peak of exactly 0.0 is a real reading that must not fall through.
+        "last_audio_level":        (state.get("input_peak")
+                                    if state.get("input_peak") is not None
+                                    else state.get("last_audio_level")),
+        "queue_depth":             _queue_depth(state.get("capture_queue")),
+        "queue_max":               state.get("capture_queue_max"),
+        "dropped_chunks":          device_drops + session_drops,
+        "dropped_capture_queue":   device_drops,
+        "dropped_session_queue":   session_drops,
+        # Stated rather than left implicit: a reader deciding whether 41s is
+        # bad should not have to find the thresholds in the source.
+        "stalled_after_sec":       CAPTURE_STALLED_AFTER_SEC,
+        "silent_after_sec":        CAPTURE_SILENT_AFTER_SEC,
+    }
+
+    where = _describe_audio_input(state)
+
+    if not running:
+        return capture, "not running", (
+            "No capture session is running — nobody has pressed Start, or it "
+            "stopped. Nothing can reach the hall screen until it is started."
+        )
+
+    ran_for = capture["running_for_sec"]
+    if audio_ago is None:
+        return capture, "silent", (
+            f"Capture has been running {ran_for}s and NOT ONE audio chunk has "
+            f"reached the pipeline from {where}. Check the input device is the "
+            "right one, is not held by another program, and has microphone "
+            "permission."
+        )
+
+    if audio_ago > CAPTURE_STALLED_AFTER_SEC:
+        return capture, "silent", (
+            f"No audio has arrived for {audio_ago}s from {where} (a chunk is "
+            f"due every 0.5s). The audio source has stopped delivering — "
+            "unplugged, switched off, or taken by another program."
+        )
+
+    if loud_ago is None or loud_ago > CAPTURE_SILENT_AFTER_SEC:
+        heard = ("nothing above the silence gate since capture started"
+                 if loud_ago is None else
+                 f"nothing above the silence gate for {loud_ago}s")
+        return capture, "silent", (
+            f"Audio is arriving from {where} ({audio_ago}s ago) but {heard}. "
+            "Either the speaker has stopped, or the feed is muted / the fader "
+            "is down — both sound identical from here."
+        )
+
+    why = (f"Capturing from {where}: audio {audio_ago}s ago, speech "
+           f"{loud_ago}s ago")
+    # A link that has just dropped has not yet produced a long caption gap,
+    # and it is about to. Say so now rather than in twenty seconds' time.
+    if conn.get("state") == "disconnected":
+        return capture, "capturing", (
+            why + f", but the link to the speech service is DOWN "
+            f"({conn.get('reason') or 'no reason given'}, attempt "
+            f"{conn.get('attempt')}). The microphone is fine — captions have "
+            "stopped because nothing can transcribe them."
+        )
+    if final_ago is None:
+        why += (f", and no caption has been published in the {ran_for}s this "
+                "session has been running — speech is being heard but nothing "
+                "is coming out of the transcribe/translate path")
+    elif final_ago > CAPTION_GAP_WORTH_NAMING_SEC:
+        why += (f", but the last caption was {final_ago}s ago. Audio is being "
+                f"captured and the link reads "
+                f"{conn.get('state') or 'unknown'}, so the fault is after "
+                "capture — transcribe, translate or publish. The server log "
+                "names which")
+    else:
+        why += f", last caption {final_ago}s ago"
+    return capture, "capturing", why + "."
+
+
+def _describe_audio_input(state: dict) -> str:
+    """The audio input in the words the person on the mandir PC picked it by."""
+    source = state.get("audio_source")
+    if source == "file":
+        return f"file {state.get('file') or '(unnamed)'}"
+    device = state.get("device")
+    if device in (None, ""):
+        return "the default input device"
+    return f"input device {device}"
+
+
+async def handle_overlay_status(request: web.Request):
+    """GET /api/overlay-status — is a capture running, and what do the caption
+    surfaces say they are showing?
+
+    🔴 `verdict` and `why` are the whole point, and they are first in the
+    response on purpose. The reader is a diagnostician on a locked Windows box
+    inside vMix who cannot open devtools and cannot read this file, and `curl`
+    is the only call they have. They should not have to interpret a single
+    other field to know whether to look at the audio or at the screen.
+
+    ⚠️ This must never be able to take the server down. It is a diagnostics
+    path on a live production process, and a status endpoint that 500s during
+    a fault is worse than no status endpoint — so every field is optional,
+    every read is guarded, and a failure to build the answer is reported IN
+    the answer rather than raised.
+    """
+    now = time.time()
+    try:
+        state = request.app.get("state")
+    except Exception:
+        state = None
+
+    try:
+        capture, verdict, why = _describe_capture(state, now)
+    except Exception as e:
+        log.error(f"/api/overlay-status: building the capture block raised {e!r}",
+                  exc_info=True)
+        capture = {"error": f"{type(e).__name__}: {e}"}
+        verdict = "unknown"
+        why = ("The server could not read its own capture state — this is a "
+               "bug in the status endpoint, not necessarily in the capture.")
+
+    surfaces = []
+    for name, r in sorted(_overlay_reports.items(),
+                          key=lambda kv: kv[1].get("at", 0), reverse=True):
+        try:
+            at = r.get("at", now)
+            surface_state = r.get("state")
+            surfaces.append({
+                "surface":   name,
+                "age_sec":   _sec_ago(at, now),
+                # The last values are KEPT rather than blanked — what a surface
+                # was showing when it stopped is evidence, and often the most
+                # interesting thing on the board.
+                "stale":     (now - at) > OVERLAY_STALE_AFTER_SEC,
+                "on_screen": r.get("on_screen", ""),
+                "on_screen_lines": r.get("on_screen_lines", []),
+                "shown":     r.get("shown", []),
+                **(surface_state if isinstance(surface_state, dict) else {}),
+            })
+        except Exception as e:
+            # One malformed report must not cost the reader the whole board,
+            # least of all the capture verdict above it.
+            surfaces.append({"surface": name, "error": f"{type(e).__name__}: {e}"})
+
+    return web.json_response({
+        "verdict":  verdict,
+        "why":      why,
+        "at":       round(now, 1),
+        "capture":  capture,
+        "surfaces": surfaces,
+    })
+
+
 async def handle_test_render(request: web.Request):
     """POST /api/test-render — broadcast a synthetic FINAL via the
     existing Broadcaster so every connected client (operator surface
@@ -3255,6 +4910,66 @@ async def handle_test_render(request: web.Request):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+# The header `stop-captions` sends. Its only job is to be something a
+# cross-origin <form> cannot set — see the note in handle_shutdown.
+SHUTDOWN_HEADER = "X-Captions-Control"
+SHUTDOWN_HEADER_VALUE = "shutdown"
+
+
+async def handle_shutdown(request: web.Request) -> web.Response:
+    """Stop the server properly, without Task Manager (issue #61).
+
+    This is the documented way out now that a stray Ctrl+C is refused. It ends
+    the process through the same clean path as a normal exit, so the mDNS
+    advert is withdrawn, the VOD worker drains and the log records a clean
+    stop rather than a hole.
+
+    **Localhost only.** Every other route here is unauthenticated because this
+    is a control-room LAN tool, and `/api/stop` already ends captions from
+    anywhere on that network. Ending the whole server is a bigger hammer than
+    that, and it exists for a script running on the machine itself, so it is
+    not offered to the network at all.
+    """
+    peer = (request.remote or "")
+    if peer not in ("127.0.0.1", "::1"):
+        log.warning(f"/api/shutdown refused for {peer!r} - localhost only.")
+        return web.json_response(
+            {"ok": False, "error": "shutdown is localhost-only"}, status=403
+        )
+
+    # ⚠️ A localhost check ALONE is not a control, and reviewing this caught it.
+    # The operator's own browser is 127.0.0.1. Any web page open on that machine
+    # can auto-submit a form-encoded POST to this URL — a "simple request", so
+    # no preflight, no consent, no visible sign — and take the katha's captions
+    # down. DNS rebinding extends the same trick from off the box.
+    #
+    # A custom header is the fix, because the one thing a cross-origin <form>
+    # cannot do is set one. `fetch` can, but only by asking permission first via
+    # a preflight this server never answers. The stop scripts send it.
+    if request.headers.get(SHUTDOWN_HEADER, "").strip().lower() != SHUTDOWN_HEADER_VALUE:
+        log.warning(
+            f"/api/shutdown refused: missing or wrong {SHUTDOWN_HEADER}. "
+            f"A browser page cannot set it; stop-captions can."
+        )
+        return web.json_response(
+            {"ok": False, "error": f"{SHUTDOWN_HEADER} header required"}, status=403
+        )
+
+    ev = request.app.get("shutdown_event")
+    if ev is None:
+        return web.json_response(
+            {"ok": False, "error": "server has no shutdown event"}, status=500
+        )
+
+    log.warning("Shutdown requested over /api/shutdown - stopping cleanly.")
+
+    # Set it on the NEXT turn of the loop, not now: `runner.cleanup()` can win
+    # the race against this response being written, and the stop script would
+    # then report a failure for a shutdown that worked perfectly.
+    asyncio.get_running_loop().call_later(0.25, ev.set)
+    return web.json_response({"ok": True, "stopping": True})
+
+
 async def main(args):
     broadcaster = Broadcaster()
 
@@ -3281,6 +4996,12 @@ async def main(args):
 
     # Session recorder — one JSONL + sibling SRT per Start→Stop session.
     results_dir = Path(__file__).parent / "results"
+    # `results/` is gitignored, so a fresh clone does not have it, and
+    # aiohttp's add_static() below refuses to start against a directory that
+    # does not exist. Existing working copies already had one from earlier
+    # runs, which is why this never surfaced until the tool was installed
+    # somewhere clean. Mirrors the uploads_dir line a few lines down.
+    results_dir.mkdir(parents=True, exist_ok=True)
     session_recorder = SessionRecorder(results_dir, APP_NAME)
 
     # Audio uploads dir — POST /api/upload-audio writes here, the path is
@@ -3357,6 +5078,9 @@ async def main(args):
     app.router.add_post("/api/vod-jobs/{jid}/transcribe", handle_vod_jobs_transcribe)
     app.router.add_delete("/api/vod-jobs/{jid}",          handle_vod_jobs_delete)
     app.router.add_post("/api/test-render",            handle_test_render)
+    app.router.add_post("/api/shutdown",              handle_shutdown)
+    app.router.add_post("/api/overlay-report",         handle_overlay_report)
+    app.router.add_get("/api/overlay-status",          handle_overlay_status)
     app.router.add_post("/api/upload-audio",           handle_upload_audio)
     app.router.add_get("/api/sessions",                handle_sessions_list)
     app.router.add_get("/api/sessions/{sid}",          handle_session_get)
@@ -3395,6 +5119,24 @@ async def main(args):
         log.info(f"React UI: serving {web_dist} at /")
     else:
         async def _spa_missing(request: web.Request):
+            # The overlay must NEVER be told about this in ink. An unstyled
+            # HTML page renders on Chromium's default WHITE background, so
+            # vMix would composite a full-screen white panel -- with a shell
+            # command printed on it -- over the programme feed, in front of
+            # the hall. That is the same fault as the operator boot gate
+            # bleeding onto the overlay, one layer further down, and it sits
+            # on exactly the path that is most likely to hit it: a build
+            # writing dist/ underneath a live browser input.
+            #
+            # For the overlay the honest failure is an empty transparent
+            # stage. The operator still gets the instruction.
+            if request.query.get("overlay") == "1":
+                return web.Response(
+                    status=200, content_type="text/html",
+                    text="<!doctype html><html><head><meta charset='utf-8'>"
+                         "<style>html,body{background:transparent;margin:0}</style>"
+                         "</head><body></body></html>"
+                )
             return web.Response(
                 status=503, content_type="text/html",
                 text="<h1>UI not built yet</h1><p>Run "
@@ -3404,6 +5146,13 @@ async def main(args):
         app.router.add_get("/",          _spa_missing)
         app.router.add_get("/{tail:.*}", _spa_missing)
         log.info(f"React UI: dist not built — / returns a placeholder")
+
+    # The clean way out. A stray Ctrl+C is refused (issue #61), so there has to
+    # be a deliberate one, and it has to run the same teardown a normal exit
+    # does rather than abandoning the mDNS advert and the VOD worker.
+    shutdown_event = asyncio.Event()
+    app["shutdown_event"] = shutdown_event
+    _install_interrupt_policy(asyncio.get_running_loop(), shutdown_event)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -3434,7 +5183,7 @@ async def main(args):
                  f"or paste a key with YOUTUBE_STREAM_KEY in .env then restart")
 
     try:
-        await asyncio.Event().wait()   # run forever
+        await shutdown_event.wait()   # runs until /api/shutdown or a deliberate Ctrl+C
     except asyncio.CancelledError:
         pass
     finally:
@@ -3444,16 +5193,202 @@ async def main(args):
         await runner.cleanup()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Surviving a stray Ctrl+C (issue #61)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The server was killed by a console control event twice on 3 September, not by
+# a crash: Task Scheduler recorded 0xC000013A (STATUS_CONTROL_C_EXIT) and the
+# log ends in `^C` immediately after healthy lines. Nobody knows who raised it,
+# and the most likely explanation needs no malice — `start-captions.bat` runs
+# the server in a visible console, and clicking that window and pressing Ctrl+C
+# to COPY a line out of it is a console control event.
+#
+# There is deliberately no attempt to detect whether an operator is watching.
+# #61 requires the check to fail toward STAYING UP, and every available signal
+# fails the other way: under `start-captions.bat` the process owns a real
+# console, so `isatty()` reports an interactive terminal and hands back exactly
+# the behaviour that caused the outage. Counting presses needs no such guess —
+# one press is always a stray, and a burst is always someone meaning it.
+
+def _install_interrupt_policy(loop, shutdown_event) -> None:
+    """Point SIGINT (and Ctrl+Break on Windows) at the policy.
+
+    The handler never raises. Raising `KeyboardInterrupt` out of a signal
+    handler is what used to end the process, and it skips the teardown — so a
+    deliberate exit sets the same event `/api/shutdown` sets and leaves through
+    the ordinary door.
+
+    ⚠️ **A closed console window cannot be caught here.** Windows delivers
+    `CTRL_CLOSE_EVENT` for that, Python does not surface it as a signal, and the
+    OS kills the process a few seconds later regardless. Refusing Ctrl+C does
+    not make the window safe to close, and `WINDOWS.md` says so.
+    """
+    # ⚠️ Parsed defensively on purpose. #61 requires this to fail toward STAYING
+    # UP, and `int()` on a blank or mistyped .env line raises inside main() —
+    # which would mean a stray keystroke in a config file stops the server
+    # booting at all. The worst a bad value may cost is the default.
+    raw = os.environ.get("CAPTION_INTERRUPT_PRESSES", "3").strip()
+    try:
+        escape_presses = int(raw)
+        if escape_presses < 0:
+            raise ValueError("negative")
+    except ValueError:
+        log.error(
+            f"CAPTION_INTERRUPT_PRESSES={raw!r} is not a whole number - "
+            f"using the default of 3."
+        )
+        escape_presses = 3
+
+    policy = InterruptPolicy(escape_presses=escape_presses)
+
+    def _handle(signum, frame):
+        decision = policy.on_interrupt()
+        if decision.should_exit:
+            log.warning(decision.message)
+            loop.call_soon_threadsafe(shutdown_event.set)
+        else:
+            # ERROR, not WARNING: in the hall this line is the trace that an
+            # outage was attempted and refused, and #61 asks for exactly that.
+            log.error(decision.message)
+
+    for name in ("SIGINT", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handle)
+        except (ValueError, OSError) as exc:
+            # Not the main thread, or a platform that will not take it. The
+            # server still runs; it is just killable the old way.
+            log.warning(f"Could not install a {name} handler: {exc}")
+
+
+@dataclass(frozen=True)
+class InterruptDecision:
+    """What to do about a console control event, and what to say about it."""
+
+    should_exit: bool
+    message: str
+    presses_in_window: int
+
+
+class InterruptPolicy:
+    """Refuses a stray interrupt; obeys a deliberate one.
+
+    `escape_presses` interrupts inside `escape_window_sec` mean the person at
+    the keyboard meant it. Anything less is ignored and reported. Set
+    `escape_presses=0` and no key combination can end the process — the
+    documented stop path is `stop-captions` either way, so this is not the same
+    as being unkillable.
+    """
+
+    def __init__(
+        self,
+        clock=time.monotonic,
+        escape_presses: int = 3,
+        escape_window_sec: float = 2.0,
+    ):
+        self._clock = clock
+        self._escape_presses = escape_presses
+        self._window = escape_window_sec
+        self._presses: list[float] = []
+
+    def on_interrupt(self) -> InterruptDecision:
+        now = self._clock()
+
+        # Only presses still inside the window count. An operator copying a
+        # line out of the console once an hour must never accumulate their way
+        # into stopping the captions.
+        self._presses = [t for t in self._presses if now - t < self._window]
+        self._presses.append(now)
+        n = len(self._presses)
+
+        if self._escape_presses > 0 and n >= self._escape_presses:
+            return InterruptDecision(
+                should_exit=True,
+                message=(
+                    f"Ctrl+C {n} times in {self._window:g}s - stopping, as asked."
+                ),
+                presses_in_window=n,
+            )
+
+        stop_hint = (
+            "Use stop-captions (or POST /api/shutdown) to stop the server."
+        )
+        if self._escape_presses <= 0:
+            tail = f"{stop_hint} Ctrl+C cannot end it on this machine."
+        else:
+            remaining = self._escape_presses - n
+            tail = (
+                f"{stop_hint} Press Ctrl+C {remaining} more "
+                f"{'time' if remaining == 1 else 'times'} within "
+                f"{self._window:g}s to exit anyway."
+            )
+
+        return InterruptDecision(
+            should_exit=False,
+            message=f"Ctrl+C ignored - captions stay up. {tail}",
+            presses_in_window=n,
+        )
+
+
 def entry():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--propresenter", action="store_true",
                    help="Also push captions to ProPresenter Messages overlay")
+    p.add_argument("--log-dir", default=None,
+                   help=f"Where to write {LOG_FILENAME} (default: logs/ next to "
+                        f"this file; ${LOG_DIR_ENV} also works)")
     args = p.parse_args()
+
+    log_path = configure_logging(args.log_dir)
+
+    # A banner, so a log covering a fortnight can be cut at the restarts.
+    # Reconstructing outage 1 meant reading Task Scheduler for the times
+    # this line would have printed for free.
+    log.info("=" * 64)
+    log.info(f"Live captions starting - pid {os.getpid()}, port {args.port}")
+    if log_path:
+        log.info(f"Log file: {log_path}")
+    else:
+        log.warning(
+            "NO WRITABLE LOG DIRECTORY - this session logs to the console only, "
+            f"and the log dies with the window. Set {LOG_DIR_ENV} to a writable path."
+        )
+
+    # Every way this process can end, named in the log, because the whole
+    # point of the file is that the next reader does not have to guess.
+    outcome = "unknown"
     try:
         asyncio.run(main(args))
     except KeyboardInterrupt:
-        log.info("Stopped.")
+        # On Windows a console close arrives here too.
+        outcome = "Ctrl+C"
+        log.warning("Stopped by Ctrl+C or a closed console (KeyboardInterrupt).")
+    except Exception:
+        # Without this the traceback goes to stderr — which the file handler
+        # is not attached to, and which under the logon task's hidden window
+        # goes nowhere at all. The `finally` line below would then print, and
+        # a crash log would end looking exactly like a clean shutdown. The
+        # hand-typed `2> ...err.log` redirect this replaces did catch
+        # tracebacks; replacing it with something worse would not be a fix.
+        outcome = "CRASHED"
+        log.exception("CRASHED - the server loop raised:")
+    else:
+        outcome = "clean"
+        log.info("Stopped: the server loop returned.")
+    finally:
+        # No logging.shutdown() here — atexit already runs it, and the file
+        # handler flushes on every record anyway. That flush is the property
+        # that matters: nothing about the 3 September outages exited cleanly.
+        log.info(f"Live captions exiting - pid {os.getpid()} - {outcome}")
+
+    # Non-zero so Task Scheduler's LastTaskResult tells the truth as well.
+    # A crash that reports success is how a machine ends up believed healthy.
+    if outcome == "CRASHED":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

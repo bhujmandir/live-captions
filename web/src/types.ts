@@ -2,6 +2,21 @@
 
 export type Direction = { source: string; target: string };
 
+// State of the server's link to the speech service — NOT this browser's own
+// socket to the server (that's `conn` in the store). `idle` means nothing is
+// capturing, which must never be painted as a fault.
+export type LinkState = "connected" | "disconnected" | "idle";
+
+// Why the link went down. `dropped` and `error` are faults; `closed` is the
+// service hanging up on an idle connection, or a direction flip closing it on
+// purpose, and reads very differently to the operator.
+export type LinkReason = "dropped" | "error" | "closed" | null;
+
+// This browser's own socket to the captions server — the other half of the
+// pair above. Declared here rather than in `store.ts` because `link-health.ts`
+// judges it too, and two copies of a three-word union is two things to drift.
+export type Connection = "connecting" | "open" | "closed";
+
 export type Feed = {
   id: string;
   label: string;
@@ -33,6 +48,11 @@ export type AudioDevice = {
   name: string;
   channels: number;
   default: boolean;
+  hostApi?: string;
+  // False when the driver refuses the tool's capture rate. Windows lists one
+  // physical input once per host API under the same name, and not all of them
+  // work — see list_audio_devices() in live_captions.py.
+  worksAt16k?: boolean;
 };
 
 export type VodRange = { start_s: number; end_s: number };
@@ -110,6 +130,10 @@ export type AppConfig = {
   defaultTarget: string;
   sarvamLangs:   Array<[string, string]>;
   mayuraLangs:   string[];
+  // Sarvam STT models the settings dropdown may offer — the single source
+  // of truth lives server-side (SARVAM_MODELS in live_captions.py) so the
+  // UI and the server can't drift apart on which model ids are valid.
+  sarvamModels:  Array<{ id: string; label: string }>;
 };
 
 // One log record in the debug ring buffer.
@@ -130,6 +154,8 @@ export type WsMsg =
   | { type: "stopped" }
   | { type: "clear" }
   | { type: "reconnected"; attempt: number }
+  | { type: "connection"; state: LinkState; attempt: number; reason: LinkReason;
+       retry_in_sec: number | null }
   | { type: "feeds_list"; feeds: Feed[] }
   | { type: "rules_list"; rules: Rule[] }
   | { type: "session_saved"; jsonl?: string; srt?: string; jsonl_url?: string | null; srt_url?: string | null }

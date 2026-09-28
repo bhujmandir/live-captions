@@ -1,0 +1,22 @@
+# Two keys, both load-bearing, for two different pnpm generations:
+#
+#   packages:    required by pnpm 9/10 — this file makes the directory a
+#                workspace root, and a root without it fails install and
+#                build outright with ERR_PNPM_WORKSPACE_PACKAGES_MISSING.
+#   allowBuilds: required by pnpm 11+, which stopped reading the
+#                `pnpm.onlyBuiltDependencies` field in package.json. Without
+#                it esbuild's postinstall is blocked, pnpm exits 1, and no
+#                bundle is produced — the mandir PC hit exactly this.
+#
+# Verified 2026-08-31 on pnpm 9, 10.34.5 and 11: installs and builds clean on
+# all three. Do not delete either key.
+packages:
+  - .
+allowBuilds:
+  esbuild: true
+  # core-js arrives with @vitejs/plugin-legacy. Its postinstall only prints a
+  # funding banner, so it is explicitly declined rather than left undecided —
+  # pnpm writes an "undecided" placeholder here on first encounter and then
+  # exits NON-ZERO with ERR_PNPM_IGNORED_BUILDS until a human resolves it,
+  # which would fail the install on the mandir PC.
+  core-js: false

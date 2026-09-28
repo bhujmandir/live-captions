@@ -1,10 +1,14 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useStore } from "@/store";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ScrubNumber } from "@/components/ScrubNumber";
-import { CAPTION_FONTS, buildOverlayUrl, type Settings } from "@/settings";
-import { Sparkles, Copy, Check } from "lucide-react";
+import { CAPTION_FONTS, buildOverlayUrl, toggleTextPanel, type Settings } from "@/settings";
+import { Sparkles, Copy, Check, AlertTriangle } from "lucide-react";
+import {
+  linesThatFit, preferenceExceedsArea, largestFontSizeFor,
+  observedArrivalMs, dwellFloorIsUnsafe, safeDwellCeilingMs,
+} from "@/fit";
 
 // Horizontal strip pinned above the stage preview. All non-spatial
 // layout config lives here: preset, font, size, weight, lines,
@@ -20,6 +24,32 @@ export function FloatingToolbar() {
   const commit      = useStore((st) => st.commitSettings);
   const testRender  = useStore((st) => st.testRender);
   const [copied, setCopied] = useState(false);
+  // Where the operator had the panel before they switched it off, so toggling
+  // it off to compare and back on does not silently reset their choice.
+  const lastPanelOpacity = useRef(0);
+
+  // Say it out loud when the settings do not fit, rather than leaving the
+  // operator to spot clipping by eye on a live output — which is how it
+  // reached the sabha. The caption is never actually clipped now (the renderer
+  // derives its line count), but silently showing fewer lines than were asked
+  // for is still a surprise, and a surprise mid-katha is expensive.
+  const clipping = preferenceExceedsArea(s.lines, s.areaH, s.fontSize);
+  const fitting  = linesThatFit(s.areaH, s.fontSize);
+  const maxFont  = largestFontSizeFor(s.lines, s.areaH);
+
+  // ⚠️ The dwell trap, said out loud where the knob is.
+  //
+  // A floor at or above the LINE arrival interval makes every line wait longer
+  // than the gap that feeds it, so lateness grows by the difference on every
+  // line — a minute behind after sixty. That is exactly the fault the sabha saw
+  // on Day 2 Morning, and it would be rebuilt on purpose.
+  //
+  // Checked against the interval MEASURED in this session, not a constant. A
+  // hardcoded 4.0s would keep reassuring the operator long after the thing it
+  // described had changed.
+  const arrivalGaps = useStore((st) => st.arrivalGaps);
+  const arrivalMs   = observedArrivalMs(arrivalGaps);
+  const dwellUnsafe = dwellFloorIsUnsafe(s.lineMinDwellSec * 1000, arrivalMs);
 
   const copyOverlayUrl = async () => {
     try {
@@ -99,9 +129,90 @@ export function FloatingToolbar() {
           width={36}
           className="h-7 border border-border bg-surface px-1.5"
         />
+        {clipping && (
+          <span
+            className="flex items-center gap-1 text-xs text-amber-500"
+            title={`The caption area is ${s.areaH}px tall, which holds ${fitting} line${fitting === 1 ? "" : "s"} at ${s.fontSize}px. Showing ${fitting}. Make the area taller, or drop the font to ${maxFont}px.`}
+          >
+            <AlertTriangle className="h-3.5 w-3.5" />
+            showing {fitting}
+          </span>
+        )}
       </Group>
 
       <Divider />
+
+      <Group label="Hold">
+        <ScrubNumber
+          value={s.lineMinDwellSec}
+          onChange={(v) => set({ lineMinDwellSec: Math.round(v * 10) / 10 })}
+          onCommit={commit}
+          min={0.25} max={10} step={0.05} precision={2}
+          width={44}
+          className={`h-7 border bg-surface px-1.5 ${dwellUnsafe ? "border-red-500" : "border-border"}`}
+        />
+        <span className="text-xs text-fgMuted">s</span>
+        {dwellUnsafe && arrivalMs !== null && (
+          <span
+            className="flex items-center gap-1 text-xs text-red-500"
+            title={
+              `Lines are arriving every ${(arrivalMs / 1000).toFixed(1)}s in this session. ` +
+              `Holding each one for ${s.lineMinDwellSec}s means the scroll cannot keep up, ` +
+              `and it will fall further behind the speaker with every line. ` +
+              `Keep this at or below ${(safeDwellCeilingMs(arrivalMs) / 1000).toFixed(1)}s.`
+            }
+          >
+            <AlertTriangle className="h-3.5 w-3.5" />
+            too slow for this speaker
+          </span>
+        )}
+      </Group>
+
+      <Group label="Clear after">
+        <ScrubNumber
+          value={s.captionMaxDwellSec}
+          onChange={(v) => set({ captionMaxDwellSec: Math.round(v) })}
+          onCommit={commit}
+          min={1} max={120}
+          width={40}
+          className="h-7 border border-border bg-surface px-1.5"
+        />
+        <span className="text-xs text-fgMuted">s</span>
+      </Group>
+
+      <Divider />
+
+      <Group label="Text panel">
+        <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+          <input
+            type="checkbox"
+            checked={s.textBgOpacity > 0}
+            onChange={() => {
+              const next = toggleTextPanel(s.textBgOpacity, lastPanelOpacity.current);
+              if (s.textBgOpacity > 0) lastPanelOpacity.current = s.textBgOpacity;
+              set({ textBgOpacity: next });
+              commit();
+            }}
+          />
+        </label>
+        <ScrubNumber
+          value={Math.round(s.textBgOpacity * 100)}
+          onChange={(v) => set({ textBgOpacity: Math.max(0, Math.min(100, Math.round(v))) / 100 })}
+          onCommit={commit}
+          min={0} max={100}
+          width={40}
+          className="h-7 border border-border bg-surface px-1.5"
+        />
+        <span className="text-xs text-fgMuted">%</span>
+        <label className="flex items-center gap-1.5 text-xs cursor-pointer" title="One fixed rounded panel instead of one that hugs each line. Fixed never moves; only the words inside it change.">
+          <input
+            type="checkbox"
+            checked={s.panelFixed}
+            onChange={(e) => { set({ panelFixed: e.target.checked }); commit(); }}
+          />
+          <span className="text-fgMuted">fixed</span>
+        </label>
+      </Group>
 
       <Group label="Background">
         <label className="flex items-center gap-1.5 text-xs cursor-pointer">

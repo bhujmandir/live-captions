@@ -27,6 +27,10 @@ import sys
 import time
 
 from dotenv import load_dotenv
+
+# How long to keep listening after the last audio frame, so trailing finals
+# still arrive before the tool exits rather than being cut off.
+FINAL_GRACE_SEC = 8.0
 load_dotenv()
 
 
@@ -130,26 +134,53 @@ async def run(audio_gen, out_file=None):
             sender_task = asyncio.create_task(sender())
             last_received = audio_start
 
-            try:
+            # A finite wav file ends, the service goes quiet, and `async for msg
+            # in ws` waits forever. This tool used to hang there, which reads as
+            # "no captions" rather than "finished" — the failure that made it
+            # dangerous. The receive loop is a task so it can simply be
+            # cancelled once the audio is done and the trailing finals have had
+            # their grace period. Cancelling is deliberate rather than closing
+            # the socket: it does not depend on what the vendor's wrapper
+            # exposes, which is what a debug tool needs least.
+            async def receive():
+                nonlocal last_received
                 async for msg in ws:
-                    if not isinstance(msg, dict):
+                    # Unwrap exactly the way the server does. This tool used
+                    # to branch on `translation` / `transcript` envelopes and
+                    # call .get() on a pydantic object, so nothing ever matched
+                    # and it printed silence — while the service was returning
+                    # everything. A debug tool that reports "no captions" during
+                    # a working session is worse than no debug tool, because it
+                    # sends someone chasing an outage that is not happening.
+                    if hasattr(msg, "model_dump"):
+                        msg = msg.model_dump()
+                    elif not isinstance(msg, dict):
                         msg = getattr(msg, "__dict__", {}) or {}
                     t = msg.get("type", "")
-                    if t == "speech_start":
-                        last_received = time.time()
-                    elif t == "translation":
-                        text = (msg.get("data") or {}).get("text", "") or msg.get("text", "")
-                        if text := text.strip():
+                    data = msg.get("data") or {}
+                    if hasattr(data, "model_dump"):
+                        data = data.model_dump()
+                    if not isinstance(data, dict):
+                        data = getattr(data, "__dict__", {}) or {}
+
+                    if t == "events":
+                        if str(data.get("signal_type", "")).upper() == "START_SPEECH":
+                            last_received = time.time()
+                    elif t == "data":
+                        text = (data.get("transcript") or data.get("text") or "").strip()
+                        if text:
                             emit(text, True, last_received)
-                    elif t == "transcript":
-                        text = (msg.get("data") or {}).get("text", "") or msg.get("text", "")
-                        if text := text.strip():
-                            emit(text, False, last_received)
+            recv_task = asyncio.create_task(receive())
+            try:
+                await sender_task
+                await asyncio.sleep(FINAL_GRACE_SEC)
             finally:
+                recv_task.cancel()
                 sender_task.cancel()
     finally:
         if fh:
             fh.close()
+
 
 
 def main():

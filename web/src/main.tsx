@@ -4,11 +4,18 @@ import App from "./App";
 import "./index.css";
 import { api } from "./api";
 import { useStore } from "./store";
+import { params } from "./env";
 
 // Overlay mode (PP Web Object) must render with a transparent body so
 // chroma-key isn't required. Detected from the URL before React mounts
 // so there's no flash of dark background.
-if (new URLSearchParams(location.search).get("overlay") === "1") {
+// Through `env.ts` like every other browser-global read. Parsing `location`
+// here a second time is how the two copies drift: this file decides whether
+// the body is transparent, `settings.ts` decides whether the chrome renders,
+// and if they ever disagree the overlay gets a dark background on the hall
+// screen with no error anywhere.
+const isOverlay = params().get("overlay") === "1";
+if (isOverlay) {
   document.body.classList.add("overlay");
 }
 
@@ -23,6 +30,31 @@ const root   = ReactDOM.createRoot(rootEl);
 // falling back — better the operator sees "can't reach server" than a
 // half-rendered UI that mysteriously won't start.
 async function boot() {
+  // The overlay does not wait for anything.
+  //
+  // The gate below is right for the operator UI and WRONG for the hall, and
+  // the two are the same bundle. The overlay reads nothing from /api/config
+  // — no branding, no language matrix — so waiting on it buys nothing and
+  // costs everything: a server that accepts the socket and then never
+  // answers leaves the hall screen with no React mounted at all. Not just no
+  // captions — nothing able to SAY there are no captions, which is the exact
+  // failure issue #57 is about. Render first; apply the config if and when
+  // it turns up.
+  if (isOverlay) {
+    root.render(
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>,
+    );
+    api.getConfig()
+      .then((cfg) => useStore.getState().applyConfig(cfg))
+      .catch((e: any) => console.error(
+        "[overlay] /api/config failed; the overlay runs without it:",
+        e?.message ? String(e.message) : String(e),
+      ));
+    return;
+  }
+
   try {
     const cfg = await api.getConfig();
     useStore.getState().applyConfig(cfg);
@@ -33,6 +65,17 @@ async function boot() {
     );
   } catch (e: any) {
     const detail = e?.message ? String(e.message) : String(e);
+    // Why BootError is never the overlay's failure, handled above: that card
+    // is opaque (`bg-bg`, which defeats body.overlay's transparency) and it
+    // composites a full-screen "server unreachable" panel over the programme
+    // feed, in front of the hall and on the stream. It also uses flex `gap`
+    // and `inset`, which vite.config.ts documents as unlayoutable on vMix's
+    // Chromium 51 -- so it would be opaque AND mispositioned, with a Retry
+    // button nobody can click on an LED wall.
+    //
+    // The overlay's failure is a transparent stage that says CAPTIONS
+    // OFFLINE once the socket has been gone ten seconds. See
+    // components/OfflineNotice.tsx.
     root.render(<BootError detail={detail} onRetry={boot} />);
   }
 }
