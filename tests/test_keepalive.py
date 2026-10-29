@@ -85,7 +85,7 @@ async def run_supervisor(*, audio, broadcaster, state, client,
 
 async def test_a_five_minute_silence_never_tears_the_session_down(
         clock, broadcaster, state):
-    """The ticket's whole point, on the shipped defaults.
+    """The keep-alive's whole point, on the shipped defaults.
 
     Five minutes of quiet between two passages, against a service that hangs
     up after 60 s of silence. Nothing is configured — this is what a first

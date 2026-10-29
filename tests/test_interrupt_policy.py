@@ -1,6 +1,6 @@
 """A stray Ctrl+C must not take the hall's captions down.
 
-Written against issue #61. The captions server was killed by a **console
+The captions server was killed by a **console
 control event** twice on the evening of 3 September — 19:19 and 22:16 — not by
 a crash. Task Scheduler recorded `3221225786` (`0xC000013A`,
 `STATUS_CONTROL_C_EXIT`) and the log's final bytes were literally `^C`,
@@ -24,7 +24,7 @@ The properties under test are the ones that failed in the hall:
     developer leaving. Only a burst means "I meant it".
 
 The design deliberately has **no detection of whether an operator is present**.
-The ticket's constraint is that the check must fail toward STAYING UP, and every
+The constraint is that the check must fail toward STAYING UP, and every
 available signal fails the other way: under `start-captions.bat` the server owns
 a real console, so `isatty()` reports an interactive terminal and would hand back
 exactly the behaviour that caused the outage. Counting the interrupts needs no
@@ -62,8 +62,8 @@ def test_one_interrupt_while_serving_does_not_stop_the_server():
 
 
 def test_the_refusal_is_reported_so_it_leaves_a_trace():
-    """#61: 'The refusal is logged, so the next occurrence leaves a trace
-    instead of silence.'
+    """The refusal is logged, so the next occurrence leaves a trace instead
+    of silence.
 
     The policy does not log — it returns the line to log, so the decision can
     be tested without a logging rig. What matters is that the line names what
@@ -140,7 +140,7 @@ def test_the_escape_hatch_can_be_switched_off_entirely():
 
     `escape_presses=0` means there is no key combination that ends the katha's
     captions. The documented stop path is still `stop-captions`, which is how
-    #61 requires it: not unkillable, but not killable by accident either.
+    it has to be: not unkillable, but not killable by accident either.
     """
     clock = VirtualClock()
     policy = InterruptPolicy(clock=clock, escape_presses=0)
@@ -180,7 +180,7 @@ def test_the_number_of_presses_is_configurable(presses: int):
     assert policy.on_interrupt().should_exit is True
 
 
-# ── The other half of #61: a documented way to stop that is not Task Manager ──
+# ── The other half: a documented way to stop that is not Task Manager ──
 
 
 class StubRequest:
@@ -203,8 +203,8 @@ async def _call_shutdown(remote: str, app: dict, headers: dict | None = None):
 async def test_shutdown_from_the_machine_itself_stops_the_server():
     """Refusing Ctrl+C is only safe if something else ends the process.
 
-    #61: 'There is a documented, non-Task-Manager way to end it.' This is it,
-    and it ends the server through the ordinary teardown rather than killing it.
+    There has to be a documented way to end it that is not Task Manager. This
+    is it, and it ends the server through the ordinary teardown rather than killing it.
 
     The event is set on a later turn of the loop so the response can be written
     first — otherwise the teardown races the reply and the stop script reports

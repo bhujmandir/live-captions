@@ -28,9 +28,9 @@ describe("importing without a browser", () => {
   });
 
   it("mints an overlay URL against an explicit base", () => {
-    const url = buildOverlayUrl(loadSettings(), "http://mandir-pc:8765");
+    const url = buildOverlayUrl(loadSettings(), "http://hall-pc:8765");
 
-    expect(url).toContain("http://mandir-pc:8765/?");
+    expect(url).toContain("http://hall-pc:8765/?");
     expect(url).toContain("overlay=1");
   });
 
@@ -40,7 +40,7 @@ describe("importing without a browser", () => {
     // buildOverlayUrl looks fine in the operator preview and silently reverts
     // to its default on the hall screen.
     const s = { ...loadSettings(), fontSize: 61, fontWeight: 800, lines: 3 };
-    const url = buildOverlayUrl(s, "http://mandir-pc:8765");
+    const url = buildOverlayUrl(s, "http://hall-pc:8765");
     const qp = new URLSearchParams(url.split("?")[1]);
 
     expect(qp.get("fs")).toBe("61");
@@ -71,7 +71,7 @@ describe("importing without a browser", () => {
 
     const back = applyOverlayParams(
       { ...DEFAULTS },
-      new URLSearchParams(buildOverlayUrl(sent, "http://mandir-pc:8765").split("?")[1]),
+      new URLSearchParams(buildOverlayUrl(sent, "http://hall-pc:8765").split("?")[1]),
     );
 
     for (const k of [
@@ -103,12 +103,11 @@ describe("importing without a browser", () => {
 });
 
 describe("the panel behind the caption text", () => {
-  // Manish, mid-katha: "make a 25% opacity background on the text". White text
+  // A 25% opacity panel behind the text. White text
   // with a drop shadow is not enough separation over a lit murti or a white
   // kurta, and the sabha at the back cannot read it.
-  it("comes ON at the owner's number, because it is part of the display he asked for", () => {
-    // "Only full line should be pushed upwards and i need 25% capacity block
-    // background" (2026-09-03). It shipped OFF by default and had therefore
+  it("comes ON at 25%, because the panel is part of the display", () => {
+    // It shipped OFF by default and had therefore
     // never once been on air: the URL that carried it reverted every time vMix
     // restarted, so the hall got the plain build every day.
     expect(DEFAULTS.textBgOpacity).toBe(TEXT_PANEL_DEFAULT_OPACITY);
@@ -121,7 +120,7 @@ describe("the panel behind the caption text", () => {
     // it looks correct in the operator preview and reverts to default on the
     // hall screen, where nobody is looking at a settings panel.
     const s = { ...loadSettings(), textBgOpacity: 0.25 };
-    const url = buildOverlayUrl(s, "http://mandir-pc:8765");
+    const url = buildOverlayUrl(s, "http://hall-pc:8765");
 
     expect(new URLSearchParams(url.split("?")[1]).get("tbg")).toBe("25");
   });
@@ -158,10 +157,9 @@ describe("the panel behind the caption text", () => {
 });
 
 describe("switching the text panel on", () => {
-  // #53: "Settable 0-100%, defaulting to 25% when switched on." A scrubber
-  // starting at zero is not that — switching on would mean dragging through
-  // 1%, 2%, 3%, and the value the owner actually asked for is never the
-  // on-value.
+  // Settable 0-100%, defaulting to 25% when switched on. A scrubber starting
+  // at zero is not that — switching on would mean dragging through 1%, 2%,
+  // 3%, and the value the display is built around is never the on-value.
   it("comes on at the opacity that was asked for", () => {
     expect(TEXT_PANEL_DEFAULT_OPACITY).toBeCloseTo(0.25);
   });
@@ -180,7 +178,7 @@ describe("switching the text panel on", () => {
 });
 
 describe("the fixed rounded panel", () => {
-  // Manish: "What about a permanent rounded border 2 line border".
+  // A permanent rounded panel, two lines tall.
   //
   // A panel that hugs each line changes width and shape with every line —
   // which is its own kind of jumpy, and jumpy is the thing this whole piece of
@@ -227,7 +225,7 @@ describe("the fixed rounded panel", () => {
 });
 
 describe("a new default has to reach a machine that has saved settings", () => {
-  // The failure this guards against reached a full hall: the 25% panel of #56
+  // The failure this guards against reached a full hall: the 25% panel
   // shipped on by default and the mandir PC showed no background, because that
   // vMix input had `captions-settings` written before the panel existed.
   // Nothing errored. It just rendered last month's appearance.
@@ -250,6 +248,14 @@ describe("a new default has to reach a machine that has saved settings", () => {
     const old = stored({ __schema: SETTINGS_SCHEMA - 1, fontSize: 41 });
 
     expect(hydrateStored(old).fontSize).toBe(DEFAULTS.fontSize);
+  });
+
+  it("gives settings saved before the AI label and forced flush their defaults", () => {
+    const s = hydrateStored(stored({ __schema: SETTINGS_SCHEMA, fontSize: 41 }));
+
+    expect(s.aiLabel).toBe(true);
+    expect(s.sarvamForceFlushSec).toBe(4);
+    expect(s.fontSize).toBe(41);
   });
 
   it("keeps the operator's layout when the schema matches", () => {
@@ -300,10 +306,88 @@ describe("a new default has to reach a machine that has saved settings", () => {
     expect("__schema" in s).toBe(false);
   });
 
-  it("ships the panel defaults #56 asked for", () => {
-    // The stamp is only worth having if the defaults behind it are the ones
-    // the owner asked for: "i need 25% capacity block background".
+  it("ships the panel defaults on", () => {
+    // The stamp is only worth having if the defaults behind it are the
+    // display's own: a fixed panel at 25%.
     expect(DEFAULTS.textBgOpacity).toBeCloseTo(0.25);
     expect(DEFAULTS.panelFixed).toBe(true);
+  });
+});
+
+describe("the Saaras model", () => {
+  // The operator UI posts its stored `sarvamModel` on every start, so a new
+  // default that stops at DEFAULTS never reaches the mandir PC: it saved
+  // "saaras:v3" back when v3 was the default.
+
+  it("defaults to saaras:v4, the model measured faster on katha audio", () => {
+    expect(DEFAULTS.sarvamModel).toBe("saaras:v4");
+  });
+
+  it("moves a model saved under an older default onto the new one, and keeps the layout", () => {
+    const savedUnderV3 = JSON.stringify({
+      __schema: SETTINGS_SCHEMA, sarvamModel: "saaras:v3", fontSize: 41,
+    });
+
+    const s = hydrateStored(savedUnderV3);
+
+    expect(s.sarvamModel).toBe("saaras:v4");
+    expect(s.fontSize).toBe(41);
+  });
+
+  it("keeps the fallback when the operator chose it under the current default", () => {
+    // Through the real writer, for the same reason as the round trip above.
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => { store.set(k, v); },
+    };
+    try {
+      saveSettings({ ...DEFAULTS, sarvamModel: "saaras:v3" });
+
+      const s = hydrateStored(store.get("captions-settings")!);
+
+      expect(s.sarvamModel).toBe("saaras:v3");
+      expect(Object.keys(s).some((k) => k.startsWith("__"))).toBe(false);
+    } finally {
+      delete (globalThis as any).localStorage;
+    }
+  });
+});
+
+describe("the AI-generated subtitles label", () => {
+  // The label comes on with the captions and the two are fixed together.
+  // Drawn inside the caption overlay, so it comes on and goes off air with
+  // the captions as one vMix input.
+
+  it("is on by default, including for a vMix URL minted before it existed", () => {
+    expect(DEFAULTS.aiLabel).toBe(true);
+    const old = new URLSearchParams("overlay=1&lines=2&fs=64&fw=600&tbg=25&panel=1");
+    expect(applyOverlayParams({ ...DEFAULTS }, old).aiLabel).toBe(true);
+  });
+
+  it("survives the overlay URL in both states", () => {
+    for (const aiLabel of [true, false]) {
+      const back = applyOverlayParams(
+        { ...DEFAULTS, aiLabel: !aiLabel },
+        new URLSearchParams(
+          buildOverlayUrl({ ...loadSettings(), aiLabel }, "http://x").split("?")[1]),
+      );
+      expect(back.aiLabel, String(aiLabel)).toBe(aiLabel);
+    }
+  });
+});
+
+describe("the forced flush", () => {
+  it("is on at 4s by default, the value proven in the Bolton hall on 6 Oct", () => {
+    expect(DEFAULTS.sarvamForceFlushSec).toBe(4);
+  });
+});
+
+describe("the lag watchdog", () => {
+  it("is on by default at the values proven on the 7 Oct replay", () => {
+    // Healthy sessions finalise 79-89% of the audio; 7 Oct 09:24 fell to
+    // 10-38% and drifted 11 minutes. The replay reconnected once, in singing.
+    expect(DEFAULTS.sarvamMinCoverage).toBe(0.4);
+    expect(DEFAULTS.sarvamLagLimitSec).toBe(20);
   });
 });

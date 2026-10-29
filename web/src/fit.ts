@@ -8,7 +8,7 @@
 //
 // The bottom line is the NEWEST line. So the fault destroyed the most important
 // words on screen, told nobody, and looked from the hall like the captions
-// "cutting off". The owner reported exactly that from the live stream.
+// "cutting off", and that is exactly what the live stream showed.
 //
 // Everything here is a pure function of numbers. No DOM, no fonts, no globals —
 // which is the point: this is the part of the clipping fix that can be proven
@@ -293,12 +293,12 @@ export type ColumnRows = {
 };
 
 /**
- * Lay out the four lines the owner described: two on screen, one queued and
+ * Lay out the four lines of the display: two on screen, one queued and
  * ready, one still being built — the last two OFF screen.
  *
  * 🔴 This is arithmetic, not decoration, and getting it wrong paints words
- * assembling themselves in front of the sabha — the one thing user story 3 of
- * spec #56 forbids. Row `i` occupies `[i*box + T, (i+1)*box + T]` against a
+ * assembling themselves in front of the sabha — the one thing the display
+ * must never do. Row `i` occupies `[i*box + T, (i+1)*box + T]` against a
  * clip of `[0, maxLines*box]`. `T` is `0` at the instant a slide starts and
  * `-box` at rest, and it is only ever between the two. So:
  *

@@ -38,7 +38,7 @@ function useStatus(): Status {
   const threshold = useStore((s) => s.settings.silencePct) / 100;
 
   // `deskNotice` is the whole decision, and it lives outside this file
-  // because it was wrong here and could not be tested here. Issue #57: the
+  // because it was wrong here and could not be tested here. On 3 September the
   // banner below was gated behind `running`, and `running` is precisely
   // what a page with no socket cannot know — so a desk that had not pressed
   // Start, or that reloaded during the outage, was shown nothing at all

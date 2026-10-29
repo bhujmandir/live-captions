@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "0c70a155",
+      "pattern": "\\b(?:\\w*fuck\\w*|shit(?:s|ty|ting|ted|head)?|bullshit|bastards?|bitch\\w*|arse(?:hole)?s?|assholes?|jackass|cunts?|dick(?:head)?s?|piss(?:ed)?|wank\\w*|bollocks|twats?|sluts?|whores?|motherf\\w*|retard(?:ed|s)?|nigg\\w*|fag(?:got)?s?|pak(?:i|is)|crap)\\b",
+      "replacement": "…",
+      "regex": true,
+      "enabled": true
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 // The clipping fix, proven without a browser.
 //
-// The owner's report from the live stream: "sometimes it cuts off ... u can see
-// it cut off at bottom". These cases pin the rule that makes that impossible.
+// Seen on the live stream: the bottom line of the captions cut off. These
+// cases pin the rule that makes that impossible.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -67,7 +67,7 @@ describe("renderedLines — the value the renderer actually trims to", () => {
 });
 
 describe("no caption can render taller than its area", () => {
-  // The regression test the spec asks for. Sweep the whole font range the
+  // The regression test for the clipping fault. Sweep the whole font range the
   // operator can scrub to, against every shipped layout, and assert the
   // rendered height never exceeds the available height.
   const layouts = [
@@ -140,8 +140,8 @@ describe("the shipped layouts", () => {
 });
 
 describe("the settled display shape", () => {
-  // The owner settled this after watching the captions live: "2 lines showing
-  // at a time". Two lines is the shape, not a per-preset ceiling — and it is
+  // Settled by watching the captions live: two lines showing at a time. Two
+  // lines is the shape, not a per-preset ceiling — and it is
   // what CAPTION_SENTENCE_MAX_CHARS (180) is set against, so a preset
   // disagreeing would put the server's cap and the display back out of step.
   it("ships two lines everywhere", () => {

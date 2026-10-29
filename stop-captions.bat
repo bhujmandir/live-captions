@@ -7,7 +7,7 @@ rem records a clean stop rather than a hole.
 rem
 rem WHY THIS EXISTS: pressing Ctrl+C in the server's console window used to end
 rem the captions instantly, and twice - on the evening of 3 September - it did
-rem exactly that in front of a full hall. Ctrl+C is now refused. See issue #61.
+rem exactly that in front of a full hall. Ctrl+C is now refused.
 rem
 rem The X-Captions-Control header is not decoration. Without it, any web page
 rem open in a browser ON THIS MACHINE could auto-submit a form to the same URL

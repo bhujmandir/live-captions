@@ -10,6 +10,10 @@ not.
 These test external behaviour only: text and rules in, text and fired ids out.
 """
 import json
+import subprocess
+from pathlib import Path
+
+import pytest
 
 import live_captions as lc
 
@@ -203,7 +207,7 @@ def test_a_normal_correction_is_unaffected():
 # unattended machine in Bolton where nobody can open devtools. The DOM
 # attribute it publishes is readable from a browser and useless from a
 # terminal, so "what is the hall screen actually showing?" had no answer from
-# outside. Asked for by the mandir PC after a deploy it could not report on.
+# outside. Added after a deploy on the mandir PC that could not be reported on.
 #
 # The handlers are called directly rather than through an HTTP client. That
 # keeps the suite's promise of no network and no extra dependency, and these
@@ -290,7 +294,7 @@ async def test_a_surface_that_stopped_reporting_is_marked_stale():
     """🔴 A dead surface still lists, and its `budget` and `opacity` read
     exactly like live values unless something says otherwise.
 
-    Found by the mandir PC: it closed its test browser and the surface kept
+    Found on the mandir PC: its test browser was closed and the surface kept
     appearing, correctly aged — but someone reading the numbers off it would
     have been reading a ghost. `age_sec` alone requires the reader to know the
     threshold and do the arithmetic; the answer should be in front of them.
@@ -317,3 +321,113 @@ async def test_a_surface_reporting_now_is_not_marked_stale():
     board = _body(await lc.handle_overlay_status(_FakeRequest()))
 
     assert board["surfaces"][0]["stale"] is False
+
+
+# ── rules.json on disk ───────────────────────────────────────────────────
+
+class _NoBroadcast:
+    async def send(self, _msg):
+        pass
+
+
+async def test_rules_json_is_written_as_utf8(tmp_path):
+    reg = lc.RulesRegistry(_NoBroadcast(), tmp_path / "rules.json", tmp_path / "none.json")
+    await reg.create(pattern="kutri", replacement="…")
+    assert "…" in (tmp_path / "rules.json").read_bytes().decode("utf-8")
+
+
+async def test_a_rules_json_written_by_a_windows_install_still_loads(tmp_path):
+    # Before 6 Oct the file was written in the console code page, so the
+    # mandir PC's "…" sits on disk as cp1252 byte 0x85.
+    path = tmp_path / "rules.json"
+    path.write_bytes(json.dumps({"version": 1, "rules": [
+        {"id": "x", "pattern": "kutri", "replacement": "…", "regex": False, "enabled": True},
+    ]}, ensure_ascii=False).encode("cp1252"))
+    reg = lc.RulesRegistry(_NoBroadcast(), path, tmp_path / "none.json")
+    await reg.load()
+    assert reg.rules["x"].replacement == "…"
+
+
+# ── A fresh install: the starter, and the live file kept apart ───────────
+
+STARTER = Path(lc.__file__).parent / "rules.starter.json"
+
+
+async def test_a_fresh_install_starts_with_the_bad_word_rule_active(tmp_path):
+    reg = lc.RulesRegistry(_NoBroadcast(), tmp_path / "rules.json", STARTER)
+    await reg.load()
+    active = [r for r in reg.rules.values() if r.enabled and r.regex]
+    text, fired = lc.apply_rules_safely("you are a bastard", active)
+    assert text == "you are a …"
+    assert fired
+
+
+async def test_the_starter_rule_leaves_ordinary_words_alone(tmp_path):
+    reg = lc.RulesRegistry(_NoBroadcast(), tmp_path / "rules.json", STARTER)
+    await reg.load()
+    text, fired = lc.apply_rules_safely("the class at Scunthorpe, the ass carried the load",
+                                        list(reg.rules.values()))
+    assert text == "the class at Scunthorpe, the ass carried the load"
+    assert fired == []
+
+
+async def test_a_saved_edit_lands_in_the_live_file_and_not_the_starter(tmp_path):
+    starter_before = STARTER.read_bytes()
+    live = tmp_path / "rules.json"
+    reg = lc.RulesRegistry(_NoBroadcast(), live, STARTER)
+    await reg.load()
+    await reg.create(pattern="kutri", replacement="…")
+    saved = json.loads(live.read_bytes().decode("utf-8"))
+    assert any(r["pattern"] == "kutri" for r in saved["rules"])
+    assert len(saved["rules"]) == 2  # the starter's rule, and the edit
+    assert STARTER.read_bytes() == starter_before
+
+
+async def test_an_edit_made_on_a_fresh_install_survives_a_restart(tmp_path):
+    live = tmp_path / "rules.json"
+    first = lc.RulesRegistry(_NoBroadcast(), live, STARTER)
+    await first.load()
+    await first.create(pattern="kutri", replacement="…")
+    second = lc.RulesRegistry(_NoBroadcast(), live, STARTER)
+    await second.load()
+    assert {r.pattern for r in second.rules.values()} >= {"kutri"}
+
+
+async def test_the_bolton_pcs_cp1252_file_loads_beside_the_starter(tmp_path):
+    # The live file there holds rule 0c70a155 with "…" as byte 0x85.
+    live = tmp_path / "rules.json"
+    starter = json.loads(STARTER.read_text(encoding="utf-8"))
+    live.write_bytes(json.dumps(starter, ensure_ascii=False).encode("cp1252"))
+    reg = lc.RulesRegistry(_NoBroadcast(), live, STARTER)
+    await reg.load()
+    assert [r.replacement for r in reg.rules.values()] == ["…"]
+
+
+def test_the_starter_carries_the_same_pattern_as_the_built_in_mask():
+    # Two copies of one list would drift; the operator sees this one in the Rules tab.
+    rules = json.loads(STARTER.read_text(encoding="utf-8"))["rules"]
+    assert [r["pattern"] for r in rules] == [lc.BAD_WORD_PATTERN]
+
+
+def test_the_live_rules_file_is_not_tracked():
+    root = Path(lc.__file__).parent
+    try:
+        ignored = subprocess.run(["git", "check-ignore", "-q", "rules.json"], cwd=root)
+    except FileNotFoundError:
+        pytest.skip("git is not installed")
+    if ignored.returncode == 128:
+        pytest.skip("not a git checkout")
+    assert ignored.returncode == 0, "rules.json must be gitignored"
+
+
+# ── The VOD pipeline reads the same live file ────────────────────────────
+
+@pytest.mark.parametrize("encoding", ["utf-8", "cp1252"])
+def test_the_vod_pipeline_reads_the_live_rules_file_in_either_encoding(tmp_path, encoding):
+    from tools import vod_pipeline
+
+    path = tmp_path / "rules.json"
+    path.write_bytes(json.dumps({"version": 1, "rules": [
+        {"id": "x", "pattern": "kutri", "replacement": "…"},
+    ]}, ensure_ascii=False).encode(encoding))
+    assert [r.replacement for r in vod_pipeline.load_rules(path)] == ["…"]

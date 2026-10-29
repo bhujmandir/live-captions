@@ -12,7 +12,7 @@ const TICK_MS = 500;
  *
  * Both `hallNotice` and `deskNotice` need this and neither can compute it:
  * they are pure, and "for how long" is the one thing a pure function of the
- * current state cannot see. Issue #57 — the desk banner keyed straight off
+ * current state cannot see. In the 3 September outage the desk banner keyed straight off
  * `conn === "closed"` and blinked off every time `api.ts` retried.
  */
 export function useSocketState(): SocketState {

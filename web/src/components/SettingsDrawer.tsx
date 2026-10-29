@@ -60,6 +60,7 @@ export function SettingsDrawer() {
 
         <footer className="border-t border-border p-3 space-y-2">
           <OverlayFitWidthToggle />
+          <AiLabelToggle />
           <CopyOverlayUrlButton />
         </footer>
       </aside>
@@ -104,6 +105,10 @@ function SarvamSection() {
           <Badge variant="outline">drives "…"</Badge>
         </label>
       </Row>
+      <Num label="Force a line after (s, 0 = off)" min={0} max={30} step={0.5}
+        value={s.sarvamForceFlushSec}
+        onChange={(v) => set({ sarvamForceFlushSec: v })}
+      />
     </section>
   );
 }
@@ -145,6 +150,22 @@ function OverlayFitWidthToggle() {
         onCheckedChange={(v) => set({ overlayFitWidth: v })}
       />
       <span className="flex-1 whitespace-nowrap">Fill full browser width</span>
+    </label>
+  );
+}
+
+// ── Overlay: "AI-generated subtitles" label ─────────────────────────
+
+function AiLabelToggle() {
+  const s   = useStore((st) => st.settings);
+  const set = useStore((st) => st.updateSettings);
+  return (
+    <label className="flex items-center gap-2 text-xs cursor-pointer px-1">
+      <Switch
+        checked={s.aiLabel}
+        onCheckedChange={(v) => set({ aiLabel: v })}
+      />
+      <span className="flex-1 whitespace-nowrap">"AI-generated subtitles" label</span>
     </label>
   );
 }

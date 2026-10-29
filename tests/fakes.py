@@ -77,7 +77,7 @@ ROOM_AMPLITUDE = 100       # peak 0.003 — a quiet room
 # a test can falsify.
 #
 # ⚠ This number is NOT confirmed against the live service. It comes from the
-# issue that specified the keep-alive, and a live probe — two seconds of
+# keep-alive's original specification, and a live probe — two seconds of
 # speech, then 150 seconds of nothing — did not reproduce it: the session
 # stayed open. Treat it as the timeout we defend against rather than one we
 # have observed. Tests here assert we stay comfortably inside it, which stays
@@ -243,10 +243,12 @@ class FakeSession:
     """
 
     def __init__(self, clock: VirtualClock, *, on_frame=None,
-                 idle_timeout_sec: float | None = None):
+                 idle_timeout_sec: float | None = None,
+                 flush_ends_session: bool = True):
         self.clock = clock
         self.frames: list[SentFrame] = []
         self.flushed = False
+        self.flush_ends_session = flush_ends_session
         self.idle_timeout_sec = idle_timeout_sec
         self.idle_closed = False
         self._last_activity_at = clock.now
@@ -280,8 +282,14 @@ class FakeSession:
 
     async def flush(self) -> None:
         self.flushed = True
-        # The real service ends the session once the tool has flushed.
-        self.close()
+        # Usually the service ends the session once the tool has flushed, and
+        # that is the default here. It is not guaranteed: in one replay a real
+        # session answered a flush with neither data nor a close and stayed
+        # open for 2h26m. `flush_ends_session=False` models that service, and
+        # is the only way a test can tell whether the tool bounds the wait —
+        # a fake that always closes is doing the tool's job for it.
+        if self.flush_ends_session:
+            self.close()
 
     def __aiter__(self):
         return self

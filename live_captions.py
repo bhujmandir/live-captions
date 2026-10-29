@@ -17,6 +17,8 @@ import argparse
 import asyncio
 import base64
 import collections
+import contextlib
+import inspect
 import json
 import logging
 import logging.handlers
@@ -55,7 +57,7 @@ def _log_dir_candidates(log_dir: "str | None") -> "list[Path]":
     somewhere else would be worse than no file. Otherwise we walk a chain,
     because the mandir PC is the machine that will one day be locked down
     with the install directory read-only, and a lost log is exactly what
-    issue #57 is about.
+    made the 3 September outage so hard to explain.
     """
     if log_dir:
         return [Path(log_dir)]
@@ -77,7 +79,7 @@ def _log_dir_candidates(log_dir: "str | None") -> "list[Path]":
 def configure_logging(log_dir: "str | None" = None) -> "Path | None":
     """Put the log somewhere that survives the window that started it.
 
-    Issue #57: on 3 September the server ran for 98 minutes doing nothing
+    On 3 September the server ran for 98 minutes doing nothing
     and left NO log, because `basicConfig` alone writes to stderr and
     stderr was a console window nobody kept. The cause had to be
     reconstructed from `explorer.exe` start times. Two later outages the
@@ -280,9 +282,20 @@ def langname(code: str) -> str:
 # Verified against Sarvam's live docs and the installed sarvamai SDK
 # (2026-08-31; SpeechToTextStreamingModel = Literal["saaras:v3", "saaras:v4"]
 # on the exact `speech_to_text_streaming.connect()` call this app makes):
-#   saaras:v3   — current default, still the vendor's recommended model
-#   saaras:v4   — current generation ("latest"); adds Global English on top
-#                 of the same 22-Indic-language coverage as v3
+#   saaras:v4   — the default; current generation, adds Global English on
+#                 top of the same 22-Indic-language coverage as v3
+#   saaras:v3   — the fallback, still supported
+#
+# v4 is the default because it was measured on the same katha recording as v3
+# (`tools/replay_audio.py --model`). Sarvam's model page says WebSocket live
+# captions "still run on Saaras v3"; that is stale — v4 connects on this path
+# and is really served, because its transcripts differ from v3's in ways v3
+# does not produce. It ends every final with a full stop where v3 ended 70 of
+# 99, so more captions release on the assembler's punctuation rule instead of
+# waiting out the quiet timer: median hold 0.91s → 0.00s.
+#
+# The ORDER below is a default too: the operator UI swaps a stored model it no
+# longer knows for the first entry.
 #
 # Two models are deliberately absent, both for the same reason — selecting
 # either one fails the connection, and a katha is a live event where an
@@ -296,18 +309,18 @@ def langname(code: str) -> str:
 #                 stop a tired operator at 6am, and there is no case where
 #                 choosing it is the right answer.
 SARVAM_MODELS: list[dict[str, str]] = [
-    {"id": "saaras:v3", "label": "saaras:v3 (default)"},
-    {"id": "saaras:v4", "label": "saaras:v4 (latest)"},
+    {"id": "saaras:v4", "label": "saaras:v4 (default — latest, faster)"},
+    {"id": "saaras:v3", "label": "saaras:v3 (previous — fallback)"},
 ]
 SARVAM_MODEL_IDS: set[str] = {m["id"] for m in SARVAM_MODELS}
-DEFAULT_SARVAM_MODEL = "saaras:v3"
+DEFAULT_SARVAM_MODEL = "saaras:v4"
 
 # Per-deployment direction defaults — set in .env so a fresh deploy lands on
 # the org's most-common direction without operator setup. This fork's own
 # default is pinned to the katha's actual, fixed direction (Gujarati spoken
 # → English captions) rather than the generic en-IN/en-IN fallback, so a
 # first-ever boot (no .env override, no browser localStorage yet) never
-# lands on a guessed/wrong direction — see issue #12.
+# lands on a guessed/wrong direction.
 DEFAULT_SOURCE_LANG = os.environ.get("DEFAULT_SOURCE_LANG", "gu-IN").strip() or "gu-IN"
 DEFAULT_TARGET_LANG = os.environ.get("DEFAULT_TARGET_LANG", "en-IN").strip() or "en-IN"
 if DEFAULT_SOURCE_LANG not in SARVAM_LANG_CODES:
@@ -382,6 +395,27 @@ def _resolve_keepalive_sec(value, fallback: float) -> float:
     log.warning(f"Keep-alive interval {value!r} ignored — must be > 0 and <= "
                 f"{MAX_KEEPALIVE_SEC:.0f}s; using {fallback:.0f}s")
     return fallback
+
+
+def _resolve_force_flush_sec(value, name: str = "force_flush_sec") -> float:
+    """`sarvam.force_flush_sec` (or another opt-in seconds knob named `name`)
+    from a start payload: seconds, or 0 for off.
+
+    Anything that is not a positive number is off, with a warning. A negative
+    value once read as "on" in one place and "off" in another, and flushed on
+    every frame of speech; a typo must not stop the start either.
+    """
+    if value in (None, "", 0):
+        return 0.0
+    try:
+        sec = float(value)
+    except (TypeError, ValueError):
+        log.warning(f"{name}={value!r} is not a number; it is off")
+        return 0.0
+    if sec <= 0:
+        log.warning(f"{name}={value!r} is not positive; it is off")
+        return 0.0
+    return sec
 
 
 KEEPALIVE_SEC = _resolve_keepalive_sec(
@@ -475,6 +509,33 @@ SENTENCE_MIN_WORDS    = int(_env_float("CAPTION_SENTENCE_MIN_WORDS", 5))
 # it bounds the error on the two time-based releases above.
 # How long a closing session waits for queued captions to be published.
 SENTENCE_DRAIN_SEC    = _env_float("CAPTION_SENTENCE_DRAIN_SEC", 10.0)
+# How long the receive side waits for the socket to go quiet AFTER the audio
+# has ended and we have flushed. It is an IDLE window, not a total budget:
+# every message that arrives resets it, so a service still sending trailing
+# transcripts is never cut off mid-sentence — only a service that has gone
+# silent without closing is.
+#
+# It exists because that is exactly what one did. Replaying five minutes of
+# katha, the audio ended at 21:17:37 and the socket sat there sending
+# nothing and closing nothing until 23:43:33 — 2h26m — when TCP finally gave
+# up with "no close frame received or sent". The keepalive did not save it:
+# `_widen_sarvam_ws_ping_timeout` was in force, so either the service answered
+# pings for two and a half hours while sending no data, or the ping machinery
+# is not doing what we believe. Both are worth knowing, and neither is a
+# reason to keep waiting.
+#
+# Five seconds is generous against what a healthy session needs: the same
+# audio on saaras:v4 drained and closed 0.76s after the audio ended. A
+# trailing transcript that has not arrived in five seconds is not coming, and
+# a caption released by shutdown decides nothing anyway.
+SOCKET_DRAIN_SEC     = _env_float("CAPTION_SOCKET_DRAIN_SEC", 5.0)
+# And an absolute ceiling on the same wait, because the window above re-arms
+# on every message: a socket sending something — anything — every four
+# seconds would hold the session open forever while satisfying the idle
+# check. Nothing observed does that, which is exactly why it is worth
+# bounding; the 2h26m hang was also nothing we had observed. A minute is
+# far longer than any real trailing transcript and far shorter than 2h26m.
+SOCKET_DRAIN_MAX_SEC = _env_float("CAPTION_SOCKET_DRAIN_MAX_SEC", 60.0)
 
 
 def derive_pipeline(source: str, target: str) -> dict:
@@ -674,9 +735,17 @@ def list_audio_devices() -> list[dict]:
     katha, with a full hall. Appending the host API is what makes the four
     distinguishable, and `works_at_16k` says outright which ones to avoid
     rather than leaving it to be discovered live.
+
+    `deviceName` is the name alone, as the driver reports it: what a start by
+    name matches (see `resolve_device`). `default` marks the system default
+    input, the one entry a page with nothing remembered may preselect.
     """
     import sounddevice as sd
     hostapis = sd.query_hostapis()
+    try:
+        default_input = int(sd.default.device[0])
+    except Exception:
+        default_input = -1
     devices = []
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] <= 0:
@@ -697,11 +766,108 @@ def list_audio_devices() -> list[dict]:
         devices.append({
             "id": str(i),
             "name": f"{d['name']} — {api}" if api else d["name"],
+            "deviceName": d["name"],
+            "default": i == default_input,
             "channels": d["max_input_channels"],
             "hostApi": api,
             "worksAt16k": works,
         })
     return devices
+
+
+def resolve_device(devices: list[dict], name: str, host_api: str = "",
+                   index: str | int | None = None) -> dict | None:
+    """The entry of `devices` (as `list_audio_devices` lists them) that a
+    start by `name` captures from, or None when today's list has no such name.
+
+    The name matches the driver's exactly, and so does the host API when one
+    is given. Where the list has the name more than once, the entry at `index`
+    goes first (the operator page sends the number of the one chosen, to tell
+    two identical inputs apart), then an entry that works at 16 kHz, then the
+    lowest index. An `index` that is not one of these entries counts for
+    nothing: a device of another name is never the answer. In katha week a
+    start that missed the hall's Line In landed on a silent Stereo Mix.
+    """
+    matches = [d for d in devices if d.get("deviceName") == name
+               and (not host_api or d.get("hostApi") == host_api)]
+    # Stable, so equal entries keep the driver's index order.
+    matches.sort(key=lambda d: (index is None or d.get("id") != str(index),
+                                d.get("worksAt16k") is False))
+    return matches[0] if matches else None
+
+
+def no_device_named(name: str, host_api: str = "") -> str:
+    """What a start by a name that `resolve_device` cannot find answers."""
+    where = f" under {host_api}" if host_api else ""
+    return f"No input device named {name!r}{where}. Nothing started."
+
+
+# ── Re-reading the device list ────────────────────────────────────────────────
+#
+# PortAudio reads the system's device list once, when it initialises, which is
+# at import. An input plugged in, disabled or re-enabled after the server
+# started is listed as it was: a start by its name would be refused for the
+# whole katha, or would open an index that is no longer that device, until a
+# server restart. Re-initialising PortAudio re-reads the list. It must never
+# happen under an open stream or while a capture is starting one (it would
+# pull the device out from under it), and the overlay gate asks once a second,
+# so it happens at most once every DEVICE_REREAD_MIN_SEC.
+#
+# `_terminate` / `_initialize` are sounddevice's own (private) calls for
+# this; there is no public one.
+
+DEVICE_REREAD_MIN_SEC = 10.0
+_open_input_streams = 0
+
+
+@contextlib.contextmanager
+def _input_stream(sd, **kwargs):
+    """`sd.InputStream(**kwargs)`, open for the `with`, and counted while it
+    is, so `reread_audio_devices` knows not to run."""
+    global _open_input_streams
+    with sd.InputStream(**kwargs) as stream:
+        _open_input_streams += 1
+        try:
+            yield stream
+        finally:
+            _open_input_streams -= 1
+
+
+def reread_audio_devices(state: dict) -> bool:
+    """Have PortAudio re-read the system's device list, unless a stream is
+    open, a capture is under way, or it did so in the last
+    DEVICE_REREAD_MIN_SEC. True if it did.
+
+    `state` is the session state dict; it keeps the time of the last re-read.
+    """
+    task = state.get("caption_task")
+    if _open_input_streams or (task is not None and not task.done()):
+        return False
+    now = time.time()
+    last = state.get("devices_reread_at")
+    if last is not None and now - last < DEVICE_REREAD_MIN_SEC:
+        return False
+    state["devices_reread_at"] = now
+    import sounddevice as sd
+    try:
+        sd._terminate()
+    except Exception as e:
+        log.warning(f"audio devices: could not re-read the device list: {e!r}")
+        return False
+    # Terminated, PortAudio lists nothing and opens nothing, so an initialise
+    # that fails is tried once more at once rather than in ten seconds.
+    for attempt in (1, 2):
+        try:
+            sd._initialize()
+            break
+        except Exception as e:
+            log.warning(f"audio devices: re-initialising PortAudio failed "
+                        f"(attempt {attempt}): {e!r}")
+    else:
+        state["devices_reread_at"] = None   # the next ask tries again
+        return False
+    log.info("audio devices: re-read the device list from the system")
+    return True
 
 
 # ── Audio generators ──────────────────────────────────────────────────────────
@@ -824,8 +990,8 @@ async def audio_from_device(device_id: str | None, chunk_ms: int = 500,
     log.info(f"audio: opening device={dev!r} sr={sr} chunk={chunk_ms}ms")
     level_task = asyncio.create_task(_level_logger())
     try:
-        with sd.InputStream(device=dev, samplerate=sr, channels=1,
-                            blocksize=n, dtype="float32", callback=cb):
+        with _input_stream(sd, device=dev, samplerate=sr, channels=1,
+                           blocksize=n, dtype="float32", callback=cb):
             log.info("audio: stream open — capturing")
             while True:
                 yield await q.get()
@@ -865,8 +1031,8 @@ async def audio_monitor_loop(device_id, broadcaster: "Broadcaster", stop_event: 
 
     try:
         log.info(f"monitor: opening device={dev!r} sr={sr}")
-        with sd.InputStream(device=dev, samplerate=sr, channels=1,
-                            blocksize=blocksize, dtype="float32", callback=cb):
+        with _input_stream(sd, device=dev, samplerate=sr, channels=1,
+                           blocksize=blocksize, dtype="float32", callback=cb):
             log.info("monitor: streaming level events")
             while not stop_event.is_set():
                 try:
@@ -1491,7 +1657,8 @@ class FeedRegistry:
 # wins against a shorter "stories → katha".
 #
 # Edits via the operator UI flow through /api/rules and are persisted to
-# `captions/rules.json` (gitignored). Hot-reload: every FINAL re-reads the
+# `rules.json` (gitignored; seeded from the tracked `rules.starter.json` on
+# first run). Hot-reload: every FINAL re-reads the
 # in-memory rules list, so an edit applies to the next caption with no
 # restart.
 
@@ -1604,6 +1771,40 @@ def apply_rules_safely(text: str, rules: list[Rule]) -> tuple[str, list[str]]:
     return corrected, fired
 
 
+# Masked on every caption, after the operator's rules, so neither an edited
+# rules list nor a fresh install can let one through. A viewer saw a swear word
+# in a translated katha line (6 Oct). Bare "ass" is left alone on purpose:
+# a donkey in a katha story can come out that way.
+BAD_WORD_PATTERN = (
+    r"\b(?:\w*fuck\w*|shit(?:s|ty|ting|ted|head)?|bullshit|bastards?|bitch\w*"
+    r"|arse(?:hole)?s?|assholes?|jackass|cunts?|dick(?:head)?s?|piss(?:ed)?|wank\w*"
+    r"|bollocks|twats?|sluts?|whores?|motherf\w*|retard(?:ed|s)?|nigg\w*"
+    r"|fag(?:got)?s?|pak(?:i|is)|crap)\b"
+)
+BAD_WORD_MASK = Rule(id="bad-word mask", pattern=BAD_WORD_PATTERN,
+                     replacement="…", regex=True)
+BAD_WORD_MASK.compile_()
+
+
+def apply_caption_rules(text: str, rules: list[Rule]) -> tuple[str, list[str]]:
+    """The operator's rules, then the bad-word mask. A separate pass, because
+    `apply_rules` orders by pattern length and the mask must see the output of
+    a rule that introduces a bad word."""
+    text, fired = apply_rules_safely(text, rules)
+    text, masked = apply_rules_safely(text, [BAD_WORD_MASK])
+    return text, fired + masked
+
+
+def _read_rules_text(path: Path) -> str:
+    """UTF-8, or cp1252 for a file written before 6 Oct by a Windows install,
+    where "…" sits on disk as byte 0x85."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252")
+
+
 class RulesRegistry:
     """Owns the substitution rules list. Mirrors FeedRegistry: persisted to
     `rules.json`, broadcast over WS on every change, hot-reloaded in-memory
@@ -1611,7 +1812,9 @@ class RulesRegistry:
 
     On first run, if rules.json is absent and `rules.starter.json` exists
     next to live_captions.py, the starter is copied into rules.json to seed
-    the new install. Otherwise the registry starts empty.
+    the new install. Otherwise the registry starts empty. Only the starter is
+    tracked; rules.json is the hall's own and is gitignored, so an update
+    never overwrites it.
     """
 
     def __init__(self, broadcaster: "Broadcaster", path: Path, starter_path: Path):
@@ -1630,7 +1833,7 @@ class RulesRegistry:
     def save(self) -> None:
         try:
             self.path.write_text(json.dumps(self._serialise_to_disk(), indent=2,
-                                            ensure_ascii=False))
+                                            ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             log.warning(f"RulesRegistry.save: {e!r}")
 
@@ -1641,7 +1844,7 @@ class RulesRegistry:
         """
         if self.path.exists():
             try:
-                data = json.loads(self.path.read_text())
+                data = json.loads(_read_rules_text(self.path))
                 for entry in data.get("rules", []):
                     self._add_from_dict(entry)
                 log.info(f"RulesRegistry: loaded {len(self.rules)} rule(s) from {self.path}")
@@ -1652,7 +1855,7 @@ class RulesRegistry:
         # First-run seed from starter dictionary.
         if self.starter_path.exists():
             try:
-                data = json.loads(self.starter_path.read_text())
+                data = json.loads(_read_rules_text(self.starter_path))
                 for entry in data.get("rules", []):
                     self._add_from_dict(entry)
                 self.save()
@@ -2269,6 +2472,68 @@ WS_PING_INTERVAL_SEC = float(os.environ.get("SARVAM_WS_PING_INTERVAL_SEC", "20")
 WS_PING_TIMEOUT_SEC  = float(os.environ.get("SARVAM_WS_PING_TIMEOUT_SEC",  "60"))
 
 
+def _log_ws_keepalive_state(ws) -> None:
+    """Say what the WebSocket keepalive was doing, at the moment it mattered.
+
+    A replay left two explanations for a socket that stayed open and silent
+    for 2h26m, and the log could not tell them apart: either the service answered
+    our pings the whole time — healthy at the protocol level, dead at the
+    application level — or `_widen_sarvam_ws_ping_timeout` is not doing what
+    we believe. `latency` is 0 until a pong has actually come back, and
+    `pings` holds those sent and still unanswered, so the two look different
+    here. Best-effort by design: this reads private state of a third-party
+    object to make the next occurrence diagnosable, and must never be the
+    reason a session fails to close.
+    """
+    sock = getattr(ws, "_websocket", ws)
+    try:
+        latency  = getattr(sock, "latency", None)
+        pending  = getattr(sock, "pings", None)
+        task     = getattr(sock, "keepalive_ping_task", None)
+        log.warning(
+            "sarvam keepalive at teardown: "
+            f"last pong round-trip {latency if latency is not None else '?'}s, "
+            f"{len(pending) if pending is not None else '?'} ping(s) unanswered, "
+            f"keepalive task {'running' if task is not None and not task.done() else 'not running'} "
+            f"(interval {getattr(sock, 'ping_interval', '?')}s, "
+            f"timeout {getattr(sock, 'ping_timeout', '?')}s)")
+    except Exception as e:
+        log.warning(f"could not read the keepalive state: {e!r}")
+
+
+async def _close_speech_socket(ws, why: str) -> None:
+    """Shut the speech link so a reader parked on it wakes up.
+
+    The only way to end a `recv()` that will never return, and the only way
+    to make a live session pick up a new language direction — both callers
+    want the same thing, and used to do it two slightly different ways.
+
+    The SDK's session object exposes no `close`: it holds the real
+    `websockets` connection as `_websocket`. So this tries the object first —
+    which is also how a test double answers, with a `close()` of its own —
+    and falls through to the connection underneath. A `close()` that RAISES
+    falls through too, because it has very likely left the socket open, which
+    is the state we are here to end.
+
+    `why` names the caller, so a log line about a closed link says which one
+    closed it.
+    """
+    for target in (ws, getattr(ws, "_websocket", None)):
+        closer = getattr(target, "close", None)
+        if closer is None:
+            continue
+        try:
+            result = closer()
+            if inspect.isawaitable(result):
+                await result
+            log.info(f"closed the speech link ({why})")
+            return
+        except Exception as e:
+            log.warning(f"could not close the speech link via "
+                        f"{type(target).__name__}.close ({why}): {e!r}")
+    log.warning(f"no way to close the speech link ({why}) — nothing left to call")
+
+
 def _widen_sarvam_ws_ping_timeout() -> bool:
     """Give Sarvam longer to answer a protocol ping before we hang up on it.
 
@@ -2300,7 +2565,7 @@ def _widen_sarvam_ws_ping_timeout() -> bool:
 # the next one — otherwise the clean-close path (which resets the backoff by
 # design, so a flip reconnects promptly) would spin against Sarvam's rate
 # limiter for as long as the fault lasted.
-# Clamped, not merely defaulted: #17 asked for a floor "regardless of how the
+# Clamped, not merely defaulted: the floor holds "regardless of how the
 # session ended", and a floor an operator can set to 0 is not a floor. The
 # environment can widen it, never remove it.
 RECONNECT_MIN_INTERVAL_SEC = max(
@@ -2420,6 +2685,16 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
         high_vad_sensitivity = bool(cfg.get("high_vad_sensitivity", True)),
         vad_signals          = bool(cfg.get("vad_signals",     True)),
     )
+    # Opt-in: during unbroken speech, ask Saaras to finalise what it has every
+    # `force_flush_sec` seconds instead of waiting for the speaker to pause.
+    # Off (0) unless the start payload sets it. See _sarvam_session's sender.
+    force_flush_sec = _resolve_force_flush_sec(cfg.get("force_flush_sec"))
+    if force_flush_sec:
+        base_kwargs["flush_signal"] = True
+    # Opt-in: reconnect when Sarvam has fallen this far behind. See the
+    # receiver in _sarvam_session.
+    lag_limit_sec = _resolve_force_flush_sec(cfg.get("lag_limit_sec"), "lag_limit_sec")
+    min_coverage = _resolve_force_flush_sec(cfg.get("min_coverage"), "min_coverage")
 
     # Client-side gate (not sent to Sarvam — pre-filters silence locally).
     gate = gate_cfg or {}
@@ -2454,7 +2729,7 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
         log.info(f"ProPresenter message id: {pp_id}")
 
     # ── Audio device lifetime decoupled from session lifetime ──────────────
-    # The raw `audio_gen` opens the mic via `with sd.InputStream(...)`. If a
+    # The raw `audio_gen` opens the mic via `with _input_stream(sd, ...)`. If a
     # consumer (the sender task) is cancelled mid-`async for`, CancelledError
     # propagates into the generator, the `with` exits, the device closes,
     # and the generator is then permanently exhausted. That's catastrophic
@@ -2603,6 +2878,9 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
                     mt_session=mt_session,
                     api_key=api_key, state=state,
                     keepalive_sec=keepalive_sec,
+                    force_flush_sec=force_flush_sec,
+                    lag_limit_sec=lag_limit_sec,
+                    min_coverage=min_coverage,
                 )
                 if stop_event.is_set():
                     break
@@ -2662,7 +2940,7 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
             state["capture_ended_at"] = time.time()
             state["capture_queue"] = None
         # Stop the audio pump, then close the underlying audio_gen so the
-        # sd.InputStream `with` block exits cleanly. Without an explicit
+        # _input_stream `with` block exits cleanly. Without an explicit
         # aclose() the device stream stays alive (the `with` only exits on
         # GC) and we get audio-queue-full warnings for tens of seconds.
         if not audio_pump_task.done():
@@ -2729,7 +3007,7 @@ async def sarvam_loop(audio_gen, broadcaster: Broadcaster, use_pp: bool, stop_ev
 GEMINI_URL_TMPL = ("https://generativelanguage.googleapis.com/v1beta/"
                    "models/{model}:generateContent")
 
-# Owner's decision, 2026-09-01, on measured evidence: briefed Gemini scored
+# Gemini is the default on measured evidence: briefed Gemini scored
 # 24/24 on the passage's terminology against Mayura's 13/24, and on six
 # minutes of the speaker's own katha it produced readable English where
 # Mayura produced word-salad ("Maharaj wrote the Shikshapatri" vs
@@ -2768,12 +3046,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 # available to new users". gemini-3.1-flash-lite answers in ~530ms and
 # accepts the thinking field; the newest Flash models were repeatedly
 # "experiencing high demand" and timed out, which is not what you want
-# in front of a hall. Revisit once #38 has scored them.
+# in front of a hall. Revisit once they have been scored offline.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
 # 2.5s was a guess and it was too tight: measured median is ~1.8s, so a
 # meaningful share of healthy calls would have timed out and been
 # answered by Mayura instead — the better translator silently absent.
-# The total end-to-end budget is #35's to set; this only stops the
+# How late a caption may be end to end is a separate question; this only stops the
 # fallback firing on calls that were going to succeed.
 GEMINI_TIMEOUT_SEC = _env_float("GEMINI_TIMEOUT_SEC", 5.0)
 # How many previously translated lines to offer as context. Enough to keep
@@ -3133,6 +3411,25 @@ async def translate_line(session: aiohttp.ClientSession, text: str, *,
     return (out or "").strip() or text
 
 
+# The coverage check judges the last three minutes, and only once at least
+# two of them were audio above the gate: a session warming up, or a room that
+# is mostly quiet, has too little to judge. 7 Oct 09:09 read 18% while warming.
+COVERAGE_WINDOW_SEC = 180.0
+COVERAGE_MIN_SENT_SEC = 120.0
+
+
+def _window_coverage(sent_log, final_log, now: float) -> float | None:
+    """Audio finalised ÷ audio sent over the last COVERAGE_WINDOW_SEC, or None
+    while too little was sent to judge. Trims both logs to the window."""
+    for q in (sent_log, final_log):
+        while q and q[0][0] < now - COVERAGE_WINDOW_SEC:
+            q.popleft()
+    sent = sum(sec for _, sec in sent_log)
+    if sent < COVERAGE_MIN_SENT_SEC:
+        return None
+    return sum(sec for _, sec in final_log) / sent
+
+
 async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                           broadcaster: "Broadcaster",
                           pp_session, pp_id: str | None,
@@ -3146,7 +3443,10 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                           mt_session: aiohttp.ClientSession | None = None,
                           api_key: str = "",
                           state: dict | None = None,
-                          keepalive_sec: float = 0.0) -> None:
+                          keepalive_sec: float = 0.0,
+                          force_flush_sec: float = 0.0,
+                          lag_limit_sec: float = 0.0,
+                          min_coverage: float = 0.0) -> None:
     """One Sarvam WebSocket session. Returns when WS closes cleanly or when
     stop_event is set. Raises websockets.exceptions.ConnectionClosed (or
     other) when the WS dies unexpectedly — the outer reconnect loop in
@@ -3294,10 +3594,10 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                 mt_ms = (time.time() - t_mt) * 1000
                 # Name the translator that was actually asked, not a fixed
                 # string. This line said "Mayura" whichever rung answered, and
-                # it cost real time: the mandir PC saw "Mayura" at Gemini
-                # latencies, with zero fallbacks logged, and reasonably
-                # concluded the briefed translator might not be in the path at
-                # all -- during a katha. A label is not evidence, and this one
+                # it cost real time: the mandir PC's log showed "Mayura" at
+                # Gemini latencies, with zero fallbacks logged, which reasonably
+                # read as the briefed translator not being in the path at all
+                # -- during a katha. A label is not evidence, and this one
                 # was actively misleading.
                 log.info(f"translate fan-out ({effective_translator(GEMINI_API_KEY)}) "
                          f"→ {sorted(wanted)} in {mt_ms:.0f}ms total")
@@ -3326,7 +3626,7 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
             active_rules = rules_reg.all() if rules_reg is not None else []
             fired_by_target: dict[str, list[str]] = {}
             for tgt_lang in list(translated.keys()):
-                corrected, fired = apply_rules_safely(
+                corrected, fired = apply_caption_rules(
                     translated[tgt_lang], active_rules)
                 translated[tgt_lang]     = corrected
                 fired_by_target[tgt_lang] = fired
@@ -3434,6 +3734,23 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
             task = asyncio.create_task(_publish(text), name="publish-caption")
             in_flight.add(task)
             task.add_done_callback(_publish_finished)
+
+        # Forced-flush bookkeeping. The receiver writes from Sarvam's VAD
+        # signals and finals; the sender reads it per frame to decide when to
+        # flush. `flush_pending` marks the final a flush asked for.
+        speech = {"in_progress": False, "last_cut": 0.0, "flush_pending": False,
+                  "last_audio_sent": 0.0}
+        # Seconds of audio sent and finalised, as (time, seconds), over the
+        # last COVERAGE_WINDOW_SEC. See the coverage check in the receiver.
+        sent_log: collections.deque = collections.deque()
+        final_log: collections.deque = collections.deque()
+        # Set when the sender stops feeding the socket, for ANY reason —
+        # the audio ran out and we flushed, or the sender died. Both leave
+        # the receive side waiting on a socket nothing will ever feed again,
+        # and it is that state, not the flush specifically, that the drain
+        # watchdog below needs to hear about. Naming it for the flush alone
+        # would leave the sender's error paths unbounded.
+        sender_finished = asyncio.Event()
 
         async def sender():
             import numpy as np
@@ -3544,6 +3861,24 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                     log.error(f"sender: ws.transcribe() raised on chunk {sent}: {e!r}")
                     raise
                 last_sent = now
+                speech["last_audio_sent"] = now
+                sent_log.append((now, len(pcm) / 2 / 16000))
+                if (force_flush_sec and speech["in_progress"]
+                        and now - speech["last_cut"] >= force_flush_sec):
+                    # Saaras finalises only on a pause. A swami who speaks for
+                    # 12s without one would otherwise put those first words on
+                    # the hall screen 12s+ late.
+                    held_for = now - speech["last_cut"]
+                    speech["last_cut"] = now
+                    speech["flush_pending"] = True
+                    log.info(f"sender: forced flush after {held_for:.1f}s of speech with no final")
+                    try:
+                        await ws.flush()
+                    except _wse.ConnectionClosed:
+                        raise          # the reconnect path owns a dead socket
+                    except Exception as e:
+                        # Optional, so it must never end the captions.
+                        log.error(f"sender: forced flush raised {e!r}; carrying on")
                 dt = time.time() - t_pre
                 if not first_send_logged:
                     log.info(f"sender: chunk 1 acknowledged by SDK in {dt*1000:.0f}ms")
@@ -3564,6 +3899,7 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                 await ws.flush()
             except Exception:
                 pass
+            sender_finished.set()
 
         sender_task = asyncio.create_task(sender())
 
@@ -3572,6 +3908,11 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
         # closed (ConnectionClosed), the outer reconnect loop will handle it
         # — don't set stop_event for that.
         def _on_sender_done(task):
+            # However it ended, no more audio is going to the socket. Set
+            # this first: the early returns below are all cases where the
+            # receive side would otherwise wait on a socket with nothing
+            # left to feed it.
+            sender_finished.set()
             if task.cancelled():
                 return
             exc = task.exception()
@@ -3586,10 +3927,56 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
         sender_task.add_done_callback(_on_sender_done)
 
         msg_counts: dict[str, int] = {}
+        stale_backlog = False
+        # Inbound messages seen. Only the drain watchdog below reads it, and
+        # only to tell a silent socket from a busy one.
+        inbound_seen = 0
+
+        # The drain watchdog runs beside this loop rather than racing
+        # it. Nothing may come between the socket and the `async for` below:
+        # a single extra scheduling hop there delays the discovery of a
+        # dropped connection, and in this repo's own tests that was enough to
+        # let five more frames go out to a dead socket and swallow a
+        # reconnect entirely. Same reason the note above rejects a ticker.
+        async def _drain_watchdog():
+            """End the session once the socket goes quiet after the flush.
+
+            An IDLE window, not a total budget: it re-arms on every message,
+            so a service still sending trailing transcripts is never cut off
+            — only one that has gone silent without closing, which is the
+            fault this exists for.
+
+            It does nothing at all until the sender has stopped. Mid-katha a
+            silent socket is normal — swami pauses — and ending the session
+            over one would be far worse than the fault being fixed.
+            """
+            await sender_finished.wait()
+            waited = 0.0
+            while True:
+                seen = inbound_seen
+                await asyncio.sleep(SOCKET_DRAIN_SEC)
+                waited += SOCKET_DRAIN_SEC
+                if inbound_seen != seen and waited < SOCKET_DRAIN_MAX_SEC:
+                    continue
+                why = ("still sending after "
+                       f"{SOCKET_DRAIN_MAX_SEC:.0f}s"
+                       if inbound_seen != seen else
+                       f"nothing received for {SOCKET_DRAIN_SEC:.0f}s")
+                log.warning(
+                    f"sarvam: {why} after the sender stopped — closing the "
+                    "socket rather than waiting on one nothing will feed "
+                    "again")
+                _log_ws_keepalive_state(ws)
+                await _close_speech_socket(ws, "drain watchdog")
+                return
+
+        drain_task = asyncio.create_task(_drain_watchdog())
+
         try:
             async for msg in ws:
                 if stop_event.is_set():
                     break
+                inbound_seen += 1
 
                 if isinstance(msg, dict):
                     d = msg
@@ -3609,13 +3996,52 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                 if envelope == "data":
                     text = (inner.get("transcript") or inner.get("text") or "").strip()
                     msg_counts["transcript"] = msg_counts.get("transcript", 0) + 1
+                    behind = (time.time() - speech["last_audio_sent"]
+                              if speech["last_audio_sent"] else 0.0)
+                    if text and lag_limit_sec and behind > lag_limit_sec:
+                        # Nothing has been sent for `behind` seconds, so this
+                        # final is about speech at least that old: Sarvam has
+                        # a backlog our latency figure cannot see (7 Oct, the
+                        # hall 10+ min behind). Its words are stale, so drop
+                        # them, and a fresh connection starts from now.
+                        log.warning(
+                            f"sarvam: a final arrived {behind:.0f}s after the last "
+                            f"audio sent, so the service is at least that far "
+                            f"behind. Dropping it and reconnecting. Text: {text!r}")
+                        stale_backlog = True
+                        break
+                    if text and min_coverage:
+                        now = time.time()
+                        dur = (inner.get("metrics") or {}).get("audio_duration")
+                        if isinstance(dur, (int, float)):
+                            final_log.append((now, float(dur)))
+                        coverage = _window_coverage(sent_log, final_log, now)
+                        if coverage is not None and coverage < min_coverage:
+                            # Healthy sessions finalise 79-89% of what they
+                            # hear. Far less, for minutes, while finals keep
+                            # coming, is the service falling behind: 7 Oct
+                            # 09:24-09:44 sat at 10-38% and drifted 11 min.
+                            log.warning(
+                                f"sarvam: finalised only {coverage:.0%} of the audio "
+                                f"sent in the last {COVERAGE_WINDOW_SEC:.0f}s, so it is "
+                                f"falling behind. Dropping this final and reconnecting. "
+                                f"Text: {text!r}")
+                            stale_backlog = True
+                            break
                     if text:
                         dur = (inner.get("metrics") or {}).get("audio_duration")
                         suffix = f"  [{dur:.2f}s]" if isinstance(dur, (int, float)) else ""
                         log.info(f"FINAL  ▶ {text}{suffix}")
+                        speech["last_cut"] = time.time()
                         # Hold the fragment until it is a whole sentence.
                         # See SentenceAssembler at module top for why.
                         ready = assembler.add(text, now=time.time())
+                        if speech["flush_pending"]:
+                            # A forced fragment goes out now. The swami is not
+                            # pausing, so the assembler's quiet window would
+                            # hold it and spend the time the flush saved.
+                            speech["flush_pending"] = False
+                            ready = ready or assembler.flush()
                         if ready:
                             _hand_off(ready)
                     else:
@@ -3625,9 +4051,12 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                     msg_counts[f"event:{sig}"] = msg_counts.get(f"event:{sig}", 0) + 1
                     if sig == "START_SPEECH":
                         log.info("sarvam: VAD start")
+                        speech["in_progress"] = True
+                        speech["last_cut"] = time.time()
                         await broadcaster.send({"type": "partial", "text": "…"})
                     elif sig == "END_SPEECH":
                         log.info("sarvam: VAD end")
+                        speech["in_progress"] = False
                         await broadcaster.send({"type": "partial", "text": ""})
                     else:
                         log.info(f"sarvam: event signal_type={sig!r} inner={inner}")
@@ -3640,7 +4069,7 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
             # Say the last words of the katha. A session that ends while a
             # sentence is still being assembled must not swallow it.
             tail = assembler.flush()
-            if tail:
+            if tail and not stale_backlog:
                 _hand_off(tail)
             # Let anything still in flight finish, so the last words of the
             # katha are actually said — but never hang the shutdown on a
@@ -3659,6 +4088,16 @@ async def _sarvam_session(client, connect_kwargs: dict, audio_gen,
                 sender_task.cancel()
                 try:
                     await sender_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # The watchdog goes LAST, and deliberately so. Every `await` in
+            # this block is a window in which the sender gets to push more
+            # audio at a socket that is already gone, so nothing new may be
+            # awaited ahead of the sender's cancellation above.
+            if not drain_task.done():
+                drain_task.cancel()
+                try:
+                    await drain_task
                 except (asyncio.CancelledError, Exception):
                     pass
 
@@ -3687,6 +4126,8 @@ async def handle_config(request: web.Request):
 
 
 async def handle_devices(request: web.Request):
+    # So the operator page lists an input plugged in after the server started.
+    reread_audio_devices(request.app["state"])
     devices = list_audio_devices()
     return web.json_response({"devices": devices})
 
@@ -3745,7 +4186,7 @@ async def handle_start(request: web.Request):
 
     body = await request.json()
     source  = body.get("source", "device")   # audio source: device | file
-    device  = body.get("device")
+    device  = body.get("device")             # an index in today's device list
     file    = body.get("file")
     seconds = body.get("seconds")
     sarvam_cfg = body.get("sarvam") or {}
@@ -3764,7 +4205,27 @@ async def handle_start(request: web.Request):
 
     # Release the level monitor first so the device is available for the
     # real capture in sarvam_loop. CoreAudio gives exclusive access on macOS.
+    # Also so the device list can be re-read below: never under an open stream.
     await _stop_monitor(app)
+
+    # A device by name (and optionally host API) is looked up in today's list,
+    # because Windows renumbers the inputs between boots. The list is re-read
+    # first, so a device plugged in, disabled or re-enabled since the server
+    # started is seen as it is now. The name wins over any index sent with it;
+    # the index only chooses between entries of that name.
+    # From here to the capture task being created there is no await, so
+    # nothing can re-read the list between the lookup and the capture.
+    device_name = body.get("device_name")
+    if source != "file" and device_name:
+        host_api = body.get("device_host_api") or ""
+        reread_audio_devices(state)
+        found = resolve_device(list_audio_devices(), device_name, host_api,
+                               index=device)
+        if found is None:
+            refusal = no_device_named(device_name, host_api)
+            log.warning(f"start refused: {refusal}")
+            return web.Response(status=400, text=refusal)
+        device = found["id"]
 
     broadcaster: Broadcaster = app["broadcaster"]
     use_pp: bool = app["use_pp"]
@@ -3859,17 +4320,11 @@ async def handle_direction(request: web.Request):
     state["target"] = tgt
     # If a session is live, close the current Sarvam WS to trigger reconnect
     # with the new direction. audio_gen, browser tabs, transcript, PP id all
-    # survive. The SDK wrapper has no .close() — close the underlying ws.
+    # survive.
     ws_client = state.get("sarvam_ws")
     if ws_client is not None:
-        try:
-            inner = getattr(ws_client, "_websocket", None)
-            if inner is None:
-                raise AttributeError(f"no _websocket on {type(ws_client).__name__}")
-            await inner.close()
-            log.info(f"flip: {prev_src}→{prev_tgt}  ⇒  {src}→{tgt}  (closed live Sarvam WS)")
-        except Exception as e:
-            log.warning(f"flip: ws.close raised {e!r}")
+        log.info(f"flip: {prev_src}→{prev_tgt}  ⇒  {src}→{tgt}")
+        await _close_speech_socket(ws_client, "direction flip")
     else:
         log.info(f"flip: {prev_src}→{prev_tgt}  ⇒  {src}→{tgt}  (no live session — applied to state only)")
     # Broadcast the new lang pair to every connected client so the
@@ -4575,9 +5030,8 @@ async def handle_upload_audio(request: web.Request):
 # useless from a terminal — so the one question worth asking of a hall screen,
 # "what do you think you are showing right now?", had no answer from outside.
 #
-# Asked for by the mandir PC after it deployed and could not report the numbers
-# back: "if it were also emitted to the server log or exposed on an HTTP
-# endpoint I could report it from here."
+# Added after a deploy on the mandir PC could not report these numbers back:
+# from that machine, only the server log or an HTTP endpoint can be read.
 #
 # Bounded, and last-write-wins per surface: this is a status board, not a log.
 _overlay_reports: dict[str, dict] = {}
@@ -4603,7 +5057,7 @@ CAPTION_GAP_WORTH_NAMING_SEC = 20.0
 
 # Past this, a surface is no longer describing anything that exists.
 #
-# 🔴 Reported by the mandir PC: it closed its test browser and the surface kept
+# 🔴 Found on the mandir PC: its test browser was closed and the surface kept
 # listing, correctly aged — but its `budget` and `opacity` still read exactly
 # like live values. `age_sec` alone makes the reader know the threshold and do
 # the arithmetic; someone glancing at a status board under time pressure will
@@ -4917,7 +5371,7 @@ SHUTDOWN_HEADER_VALUE = "shutdown"
 
 
 async def handle_shutdown(request: web.Request) -> web.Response:
-    """Stop the server properly, without Task Manager (issue #61).
+    """Stop the server properly, without Task Manager.
 
     This is the documented way out now that a stray Ctrl+C is refused. It ends
     the process through the same clean path as a normal exit, so the mDNS
@@ -4987,8 +5441,9 @@ async def main(args):
     await feed_registry.load()
 
     # Rules registry — substitution rules applied to translated output
-    # before any downstream surface. Seeds from rules.starter.json on
-    # first run if rules.json doesn't yet exist.
+    # before any downstream surface. rules.json is the hall's own (gitignored);
+    # on first run it is seeded from the tracked rules.starter.json, which
+    # holds the bad-word rule.
     rules_path         = Path(__file__).parent / "rules.json"
     rules_starter_path = Path(__file__).parent / "rules.starter.json"
     rules_registry = RulesRegistry(broadcaster, rules_path, rules_starter_path)
@@ -5147,7 +5602,7 @@ async def main(args):
         app.router.add_get("/{tail:.*}", _spa_missing)
         log.info(f"React UI: dist not built — / returns a placeholder")
 
-    # The clean way out. A stray Ctrl+C is refused (issue #61), so there has to
+    # The clean way out. A stray Ctrl+C is refused, so there has to
     # be a deliberate one, and it has to run the same teardown a normal exit
     # does rather than abandoning the mDNS advert and the VOD worker.
     shutdown_event = asyncio.Event()
@@ -5194,7 +5649,7 @@ async def main(args):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Surviving a stray Ctrl+C (issue #61)
+# Surviving a stray Ctrl+C
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # The server was killed by a console control event twice on 3 September, not by
@@ -5205,7 +5660,7 @@ async def main(args):
 # to COPY a line out of it is a console control event.
 #
 # There is deliberately no attempt to detect whether an operator is watching.
-# #61 requires the check to fail toward STAYING UP, and every available signal
+# The check must fail toward STAYING UP, and every available signal
 # fails the other way: under `start-captions.bat` the process owns a real
 # console, so `isatty()` reports an interactive terminal and hands back exactly
 # the behaviour that caused the outage. Counting presses needs no such guess —
@@ -5224,7 +5679,7 @@ def _install_interrupt_policy(loop, shutdown_event) -> None:
     OS kills the process a few seconds later regardless. Refusing Ctrl+C does
     not make the window safe to close, and `WINDOWS.md` says so.
     """
-    # ⚠️ Parsed defensively on purpose. #61 requires this to fail toward STAYING
+    # ⚠️ Parsed defensively on purpose. This must fail toward STAYING
     # UP, and `int()` on a blank or mistyped .env line raises inside main() —
     # which would mean a stray keystroke in a config file stops the server
     # booting at all. The worst a bad value may cost is the default.
@@ -5249,7 +5704,7 @@ def _install_interrupt_policy(loop, shutdown_event) -> None:
             loop.call_soon_threadsafe(shutdown_event.set)
         else:
             # ERROR, not WARNING: in the hall this line is the trace that an
-            # outage was attempted and refused, and #61 asks for exactly that.
+            # outage was attempted and refused, which is exactly what it is for.
             log.error(decision.message)
 
     for name in ("SIGINT", "SIGBREAK"):

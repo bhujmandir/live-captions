@@ -1,0 +1,21 @@
+{
+  "input_title": "Captions Overlay",
+  "input_key": "",
+  "overlay": 2,
+  "device_name": "",
+  "device_host_api": "",
+  "source_lang": "",
+  "target_lang": "",
+  "speech": {
+    "model": "saaras:v4",
+    "force_flush_sec": 4,
+    "min_coverage": 0.4,
+    "lag_limit_sec": 20
+  },
+  "stop_grace_sec": 10,
+  "navigate_grace_sec": 15,
+  "overlay_url": "http://127.0.0.1:8765/?overlay=1&lines=2&fs=64&fw=600&tbg=25&panel=1&ailabel=1",
+  "vmix_api": "http://127.0.0.1:8088/api/",
+  "captions_server": "http://127.0.0.1:8765",
+  "poll_sec": 1
+}

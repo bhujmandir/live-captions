@@ -196,11 +196,11 @@ over — in a discourse where every sentence leans on the one before it. It also
 dropped 24 of 690 sentences on Day 3 (3.5%), because one caption in reserve has
 nowhere to put a burst.
 
-🔴 **The unit of the display is now a LINE, and the screen SCROLLS.** The owner
-settled it on Day 3 after watching the block model in the hall: *"What i want
-Is three lines of text / 2 on the screen and 3rd 1 is on the queue and 4th one
-is being constructed ... I want the text to scroll up in a queue as the next
-line is generated / Only full line should be pushed upwards"*.
+🔴 **The unit of the display is now a LINE, and the screen SCROLLS.** Watching
+the block model in the hall on Day 3 settled it. The display is three lines of
+text and one in progress: two on the screen, a third on the queue, a fourth
+being constructed. The text scrolls up in a queue as each next line is
+generated, and only a full line is ever pushed upwards.
 
 So: two lines visible, one complete line queued, and text still building into
 the next. A line enters at the BOTTOM and the oldest falls off the TOP, one at a
@@ -214,7 +214,7 @@ and the line being built are real rows in the column, below the clip. `fit.ts`
 Why they are rendered at all, when the hall cannot see them: the "still
 speaking" indicator has to ride the line being BUILT. It shipped on the bottom
 VISIBLE line for one katha, which is the sabha watching a sentence assemble
-itself — the exact thing spec #56 user story 3 forbids. There was no off-screen
+itself — the exact thing the display must never show. There was no off-screen
 row for it to ride, so it fell back to the last row that existed.
 
 ⚠️ **The visible slots are PADDED to `maxLines` even when the screen is not
@@ -226,8 +226,8 @@ delete the padding and three of them fail.
 
 🔴 **A half-built line NEVER reaches the screen.** The sabha reads whole lines
 appearing, never words assembling themselves. A line is complete when it fills
-the measured width OR when the text building it ends a sentence — the owner
-settled the second: *"Push the short 1 up"*. Neither waits for the other.
+the measured width OR when the text building it ends a sentence, in which case
+it goes up short. Neither waits for the other.
 `LINE_ORPHAN_MS` (2.6s) releases text stranded in `building` when the server
 released a caption mid-sentence on its max-wait ceiling and the speaker then
 stopped; without it the display would repeat the old silence clear's fault of
@@ -366,7 +366,7 @@ chunks dropped.
 check. The reader is a diagnostician inside vMix on a locked Windows box who
 cannot open devtools and cannot read this file; they should not have to
 interpret a single other field, and the output should be pasteable straight
-into the tracker.
+into a fault report.
 
 **Every "when did X last happen" carries a derived `_sec_ago`.** A raw epoch
 timestamp is not an answer to someone reading JSON on a phone at the back of a
@@ -399,17 +399,16 @@ pipeline ever writes, and the board would report a permanently healthy silence.
 single rounded rectangle sized to hold exactly `maxLines`, always the same size
 and in the same place; without it the background paints on the text run and
 hugs each rendered line. Painting both at once doubles the opacity behind the
-words and reads as a dark smear. The fixed panel is the owner's ask — *"a
-permanent rounded border 2 line border"* — and its point is that it does not
-move: it must NOT shrink for a one-line caption. `border-radius` and `rgba()`
-are both safe on Chromium 51; `inset` is not, which is why the panel is
-positioned with left/top/width.
+words and reads as a dark smear. The fixed panel is one rounded rectangle,
+two lines tall, and its point is that it does not move: it must NOT
+shrink for a one-line caption. `border-radius` and `rgba()` are both safe on
+Chromium 51; `inset` is not, which is why the panel is positioned with
+left/top/width.
 
-**The panel ships ON, two lines tall, at 25%** — *"i need 25% capacity block
-background"*, the owner, 2026-09-03. It was built OFF by default and had
-therefore never once been on air: the URL that carried it reverted every time
-vMix restarted, so the hall got the plain build every day.
-
+**The panel ships ON, two lines tall, at 25%** opacity: enough to separate white
+text from a lit murti, light enough to leave the picture. It was built OFF by
+default and had therefore never once been on air: the URL that carried it
+reverted every time vMix restarted, so the hall got the plain build every day.
 ⚠️ **The headroom is 2.55 lines a caption, and a THREE-line caption already
 overruns it.** Day 3 measured a 3.83s median caption gap; the line dwell floor
 is 1500ms, so 2.55 lines can go up between arrivals. The measured shape was
@@ -435,8 +434,8 @@ returned would flash on every pause between passages, which is more movement
 than the scroll it was built to replace, and it would move the hall's eye off
 the place the words appear. The cost is real — a panel over an empty stage on
 a long pause — and the operator's lever for it is `textBgOpacity=0` in the
-overlay URL, not code. If this is ever revisited, it needs the owner: it is
-what he sees, not what the code prefers.
+overlay URL, not code. If this is ever revisited, decide it by watching the
+hall screen: it is what the sabha sees, not what the code prefers.
 
 **The clip box is `maxLines` line boxes, NOT `areaH`.** They are different
 numbers — `areaH` is the operator's box and holds 3.4 lines at the medium
@@ -470,8 +469,8 @@ a test fails if it ever emits hex.
 box can actually hold — and tells the store with `setMaxVisibleLines`. They used
 to be independent settings with nothing reconciling them, so when the configured
 count needed more vertical space than the area had, the box quietly cut the
-bottom off — the NEWEST line, the one that mattered most. It told nobody, and the
-owner saw it from the hall as captions "cutting off".
+bottom off — the NEWEST line, the one that mattered most. It told nobody, and
+from the hall it looked like captions "cutting off".
 
 Everything in `fit.ts` is a pure function of numbers: no DOM, no font metrics,
 no globals. That is deliberate — it is the half of the clipping fix that can be
@@ -548,8 +547,8 @@ work. A running server on the documented default still captions the katha.
 
 **The fan-out log line named the wrong translator too.** It was a hardcoded
 `"Mayura fan-out"` printed whichever rung answered, and it cost real time —
-the mandir PC saw "Mayura" at Gemini latencies with zero fallbacks logged and
-reasonably concluded, mid-katha, that the briefed translator might not be in
+the mandir PC's log showed "Mayura" at Gemini latencies with zero fallbacks
+logged, which reasonably read, mid-katha, as the briefed translator not being in
 the path. It now names the translator actually configured.
 
 `thinkingConfig.thinkingBudget` is pinned to 0 and `temperature` to 0. A
@@ -597,7 +596,7 @@ Tracking it is now the point, not a concession:
   A machine that "has the code" does not have the quality.
 - **It was surviving as one untracked file on one Windows PC** with no
   backup and no history. Losing it costs more than the code.
-- **It is the artefact a Gujarati reader reviews** (ticket #7). A file that
+- **It is the artefact a Gujarati reader reviews**. A file that
   cannot be diffed cannot be reviewed, and every rendering in it is a
   developer's guess until someone who reads Gujarati says otherwise.
 
@@ -682,8 +681,8 @@ past the floor, ×1.7 to a cap of 8 s.
 ### When the server is not there at all
 
 Everything above is about the server's link to Sarvam. The other outage
-is coarser and it happened first: **there is no server**. Issue #57 —
-98 minutes of nothing, with three things all failing to say so.
+is coarser and it happened first: **there is no server**. On 3 September
+that was 98 minutes of nothing, with three things all failing to say so.
 
 - **The log did not exist.** `basicConfig` alone writes to stderr, and
   stderr was a console window nobody kept. `configure_logging()` in
@@ -714,6 +713,42 @@ wrong renders inside vMix's Chromium 51, where none of it can be run or
 inspected. Anything that cannot be asserted off the browser cannot be
 trusted before a katha.
 
+### The overlay gate, and what runs by itself
+
+The desk's only control is vMix's overlay 2 button, so a program has to follow it. That is
+`tools/vmix/overlay_gate.py`, and it runs next to the server as the second of two Windows logon
+tasks (`register-startup-task.ps1`; the install steps, settings and log are in `WINDOWS.md`).
+
+- **One step, no loop.** `Gate.decide()` takes what vMix's API said (is `Captions Overlay` on
+  overlay 2, or unreadable) and what `/api/overlay-status` said (is a capture running, which
+  overlay surfaces reported lately), and returns the actions: start, stop, navigate, or none.
+  `Gate.step()` reads, decides and carries them out; `main()` repeats it once a second.
+  Importing the module starts nothing, which is what lets `tests/test_overlay_gate.py` drive
+  it against a fake vMix and a fake server (`tests/fakes_gate.py`) with a virtual clock.
+- **Unreadable is not off.** A vMix that is closed, loading or busy, or a server that does not
+  answer, changes nothing and cancels a pending stop. A vMix restart does not stop a capture.
+- **Start by name, wait for stopped.** A start carries the device's *name* (and host API), and
+  the server resolves today's number or refuses (`resolve_device`); the gate never picks a
+  number. A start is only sent once `capture.running` is false: a stop followed at once by a
+  start answers "Already running" and leaves nothing capturing.
+- **Navigate, not reload.** Overlay 2 on and no `overlay-` surface fresh for the navigate grace
+  (15 s) means vMix's browser input never loaded the page, or lost it, and it never retries on
+  its own. The gate sends `BrowserNavigate` to `overlay_url`, then again after 30 s, then once
+  a minute. A reload would keep a wrong stored URL. A surface that is reporting is never
+  touched, so an old URL that loads is not corrected here: the preset has to be saved right.
+- **Settings in a file.** Everything a hall might change (input title, overlay number, device,
+  language direction, speech settings, graces, URLs) is in `overlay-gate.json`, with the
+  defaults in the `Settings` dataclass. A missing or partial file means defaults, and the log
+  says which. The defaults name no hall: an empty device or language is not sent, so the
+  server's own default input and `.env` direction apply rather than one hall's.
+- **Supervision is Task Scheduler's.** Both tasks restart on failure every minute, up to 999
+  times. The server's wrapper (`deploy.ps1 -StartOnly -NoBrowser`) hands the server's exit code
+  to the task, so a crash is restarted and a `stop-captions.bat` stop (exit 0) is not. Neither
+  task redirects output; each process rolls its own log at midnight.
+
+None of the Windows half of this (the tasks, the restarts, a real vMix's answers) can be
+tested from here. `WINDOWS.md` holds the dry run that does.
+
 ## File layout
 
 ```
@@ -731,10 +766,16 @@ uv.lock               Pinned lockfile
 deploy.sh             macOS installer (Homebrew, portaudio, uv, .env)
 deploy.ps1            Windows installer + start; see WINDOWS.md
 start-captions.bat    Windows double-click start (no typing) - manual fallback
-register-startup-task.ps1  One-time: register the Windows logon task (runs headless)
-logs/                 Server log, rotated at midnight, 14 days kept (gitignored)
-WINDOWS.md            Windows sequence, boot behaviour, and what is still unverified
-rules.json            Substitution rules (managed via Rules tab; empty by default)
+register-startup-task.ps1  One-time: register the two Windows logon tasks, the server and the overlay gate (both headless, both restart on failure)
+tools/vmix/overlay_gate.py  Follows vMix's overlay 2 button; navigates a blank overlay back
+overlay-gate.example.json   Tracked: every gate setting and its default
+overlay-gate.json     The hall's own gate settings (gitignored)
+logs/                 Server log and overlay-gate.log, each rotated at midnight, 14 days kept (gitignored)
+WINDOWS.md            Windows sequence, vMix setup, boot behaviour, the dry run, and what is still unverified
+DESK-CHECKLIST.md     One page for the desk: what to open, what healthy looks like, what to do if blank
+CHANGELOG.md          What each update changed, and what is still not fixed
+rules.starter.json    Starter word rules: the bad-word mask. Tracked; copied to rules.json on first run
+rules.json            The hall's live word rules (managed via Rules tab; gitignored)
 outputs.json          YouTube CC feed list (gitignored)
 vod-jobs.json         VOD reprocess job history (gitignored)
 samples/              Test audio (gitignored)
@@ -866,6 +907,15 @@ a substitute for the between-attempts wait, a client that records the virtual
 time of every connect, and a broadcaster that fans out to real browser tabs as
 well as recording.
 
+`tests/fakes_gate.py` holds the doubles for the overlay gate
+(`tools/vmix/overlay_gate.py`): a vMix API answering canned XML (overlay 2 on
+or off, the captions input missing, nothing listening) that records every
+function it is told to carry out (`BrowserNavigate`), and a captions server
+that lists the caption surfaces a test gives it, records every start and stop
+it is sent, and can take a few polls to finish a stop. Tests drive the gate's
+single step, `Gate.step()`, with a time they choose, so a 10 s grace costs no
+wall clock.
+
 **The between-attempts wait is a parameter because the virtual clock cannot
 reach it.** It is `asyncio.wait_for(stop_event.wait(), timeout=…)`, which runs
 on the event loop's clock, not on `time.time()`. `sarvam_loop(...,
@@ -895,10 +945,12 @@ connects, rather than triggering it from `on_frame`.
   internal concerns (Sarvam streaming, audio, web, registries, mDNS) are
   intentionally co-located so they share one event loop and broadcast bus.
 - **State files are gitignored.** `outputs.json`, `vod-jobs.json`,
-  `.env`, `.gcp-adc.json`, `results/`, `uploads/`, `samples/` are
-  per-deployment. Only `rules.json` is tracked (empty by default; serves
-  as the schema reference), and a `rules.starter.json` can sit next to
-  the script to seed a fresh deployment with a preset dictionary.
+  `rules.json`, `overlay-gate.json`, `.env`, `.gcp-adc.json`, `logs/`,
+  `results/`, `uploads/`, `samples/` are per-deployment. The tracked
+  `rules.starter.json` holds the bad-word rule and seeds a fresh deployment's
+  `rules.json` on first run; edits from the Rules tab go to `rules.json` only,
+  so an update never overwrites them. `overlay-gate.example.json` lists the
+  gate's settings; a hall's own `overlay-gate.json` is its own.
 - **No org branding in code — this means VALUES, not explanations.**
   Every event-specific name, colour and IP goes through `.env`; a static
   LAN IP or an org name as a default value is always wrong.
@@ -938,12 +990,12 @@ connects, rather than triggering it from `on_frame`.
 
 - **A console window as the sign that the server is up.** It is a thing
   people close. Two console control events on 3 September, 19:19 and
-  22:16, both `STATUS_CONTROL_C_EXIT` (#61); the owner confirmed he
-  closed one of the windows himself, because it was empty and looked
-  useless. The logon task now runs `powershell.exe -WindowStyle Hidden`,
-  and the log file, the operator banner and the overlay's
-  `CAPTIONS OFFLINE` pill carry the signal instead. The interrupt itself
-  is still fatal — that is #61, not built here.
+  22:16, both `STATUS_CONTROL_C_EXIT`; one of the windows was closed
+  by hand, on purpose, because it was empty and looked useless. The
+  logon task now runs `powershell.exe -WindowStyle Hidden`, and the log
+  file, the operator banner and the overlay's `CAPTIONS OFFLINE` pill
+  carry the signal instead. The interrupt itself is still fatal;
+  surviving it is not built.
 - **Trusting `Register-ScheduledTask` because it printed no error.** On
   the mandir PC it had failed with *Access is denied* and setup was
   assumed done. `register-startup-task.ps1` now reads the task back, and
@@ -988,7 +1040,7 @@ connects, rather than triggering it from `on_frame`.
   reaches the rows the scroll occupies.
 - **Shipping a new DEFAULT and expecting it on a machine that has run this
   before** — stored settings used to beat `DEFAULTS` unconditionally. The 25%
-  panel of #56 shipped on by default and the hall screen showed no background,
+  panel shipped on by default and the hall screen showed no background,
   because that vMix input had `captions-settings` written before the panel
   existed. Nothing errored; it rendered last month's appearance, and a reload
   does not help — localStorage outlives it. `captions-settings` now carries
@@ -1006,7 +1058,7 @@ connects, rather than triggering it from `on_frame`.
   ⚠️ but it changes the LIVE PAGE, not the input's stored URL, so the change
   reverts on a vMix restart or preset reload. A URL fix only sticks once
   somebody pastes it into the input's own settings and saves the preset.
-  (`BrowserNavigate` also silently refuses any URL containing a comma — #34 —
+  (`BrowserNavigate` also silently refuses any URL containing a comma,
   so `%2C` it.)
 - **Assuming the overlay runs a modern Chromium** — it does not. Every request
   that vMix browser input has made, across four server logs, carries

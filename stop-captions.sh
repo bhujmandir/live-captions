@@ -6,7 +6,7 @@
 #
 # WHY THIS EXISTS: a stray Ctrl+C in the server's console used to end the
 # captions instantly, and twice did exactly that during a live event. Ctrl+C is
-# now refused. See issue #61.
+# now refused.
 #
 # The X-Captions-Control header is not decoration. Without it, any web page
 # open in a browser ON THIS MACHINE could auto-submit a form to the same URL

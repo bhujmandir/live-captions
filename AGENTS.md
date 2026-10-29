@@ -20,7 +20,7 @@ because something on the list below was learned the expensive way.
 3. **Check [`docs/adr/`](docs/adr/).** Two decisions are written down and frozen. Changing
    either is a decision, not a refactor.
 4. **Run both suites before you start**, so a red you inherit is not a red you think you made:
-   `uv run pytest -q` and `cd web && npx vitest run`. No network, no API key and no audio
+   `uv run --extra dev pytest -q` and `cd web && npx vitest run`. No network, no API key and no audio
    device. Seconds, not minutes.
 
 ---
@@ -68,6 +68,7 @@ not yours to close by writing more code.
 | You want to | Read |
 |---|---|
 | Run it, or find out what it needs | [`README.md`](README.md) |
+| Set up a new hall PC | [`SETUP.md`](SETUP.md) |
 | Change the server or the overlay | [`docs/how-it-works.md`](docs/how-it-works.md) |
 | Use the right word for something | [`CONTEXT.md`](CONTEXT.md) |
 | Know what is deliberately frozen | [`docs/adr/`](docs/adr/) |
@@ -100,8 +101,3 @@ the one in the path, two settings confirmed on screen and absent from the saved 
 
 **Name the gap.** "Green on macOS, untested on Windows" is a useful result. "Green" is not,
 when the surface that matters is the one you could not reach.
-
----
-
-*Issue numbers in this repository's documents (`#61`, `#25`, …) refer to the tracker of the
-project this code was developed in. They record provenance and will not resolve here.*

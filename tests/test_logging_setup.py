@@ -1,6 +1,6 @@
 """The log has to outlive the window that started the server.
 
-Written against the 3 September outage (issue #57). The server ran for
+Written against the 3 September outage. The server ran for
 98 minutes doing nothing and left no log at all, because every line went
 to a console window's stderr and died with it — the cause had to be
 reconstructed afterwards from `explorer.exe` start times and Task

@@ -148,7 +148,7 @@ def test_presses_zero_makes_the_process_refuse_every_interrupt():
 
 
 def test_a_mistyped_press_count_does_not_stop_the_server_starting():
-    """#61: 'it must fail toward STAYING UP.'
+    """It must fail toward STAYING UP.
 
     A blank or mistyped line in `.env` must cost the default, never the boot.
     Before this was parsed defensively, `int("")` raised inside `main()` and a

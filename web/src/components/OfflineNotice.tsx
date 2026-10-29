@@ -3,7 +3,7 @@ import { useSocketState } from "@/use-socket-state";
 
 // The one thing the hall screen could not say.
 //
-// Issue #57: 98 minutes with no server, and the caption area looked
+// 3 September: 98 minutes with no server, and the caption area looked
 // identical to a quiet moment in the katha — empty. Nobody in the sabha,
 // and nobody walking past the desk, had any way to tell.
 //

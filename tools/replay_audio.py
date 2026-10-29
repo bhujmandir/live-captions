@@ -86,7 +86,22 @@ async def main(argv: "list[str] | None" = None):
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--source", default="gu-IN")
     ap.add_argument("--target", default="en-IN")
+    ap.add_argument("--model", default=None, help="e.g. saaras:v4")
+    ap.add_argument("--min-coverage", type=float, default=0.0,
+                    help="reconnect when Sarvam finalises less than this share of "
+                         "the audio over 3 min (e.g. 0.4); 0 = off")
+    ap.add_argument("--lag-limit", type=float, default=0.0,
+                    help="reconnect when a final arrives this many seconds after "
+                         "the last audio sent; 0 = off")
+    ap.add_argument("--force-flush", type=float, default=0.0,
+                    help="seconds of unbroken speech before a forced flush; 0 = off")
     args = ap.parse_args(argv)
+
+    # A Windows console is cp1252, and one caption with "₹" in it raised
+    # UnicodeEncodeError and was lost from the replay (6 Oct).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
     if not os.environ.get("SARVAM_API_KEY"):
         sys.exit("SARVAM_API_KEY is not set")
@@ -107,7 +122,11 @@ async def main(argv: "list[str] | None" = None):
         await lc.sarvam_loop(
             wav_frames(args.wav, start=args.start, seconds=args.seconds,
                        speed=args.speed, stop_event=stop_event),
-            bc, False, stop_event, state)
+            bc, False, stop_event, state,
+            sarvam_cfg={k: v for k, v in {"model": args.model,
+                                          "force_flush_sec": args.force_flush,
+                                          "min_coverage": args.min_coverage,
+                                          "lag_limit_sec": args.lag_limit}.items() if v})
         print(f"\n{len(bc.finals)} captions -> {args.out}")
 
 if __name__ == "__main__":

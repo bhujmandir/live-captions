@@ -4,6 +4,10 @@ import { Label } from "@/components/ui/label";
 import { useStore } from "@/store";
 import { api } from "@/api";
 import type { AudioDevice } from "@/types";
+import {
+  pickDevice, rememberDevice, readRememberedDevice, startDevice,
+  type RememberedDevice,
+} from "@/device-pick";
 import { CaptionRenderer } from "@/components/CaptionRenderer";
 import { FloatingToolbar } from "@/components/FloatingToolbar";
 import { DraggableRect, type Bounds, type SnapInfo } from "@/components/DraggableRect";
@@ -15,8 +19,12 @@ import {
   Upload, Download, X, Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { readStored, writeStored } from "@/env";
 
-const DEVICE_ID_KEY = "captions-device-id";
+// The chosen device by name and host API (see device-pick.ts). An older page
+// kept its number under "captions-device-id"; that key is dropped unread.
+const DEVICE_KEY = "captions-device";
+const OLD_DEVICE_ID_KEY = "captions-device-id";
 const STAGE: Bounds = { x: 0, y: 0, w: 1920, h: 1080 };
 
 export function LiveTab() {
@@ -52,6 +60,7 @@ export function LiveTab() {
 
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
+  const [deviceMissing, setDeviceMissing] = useState<RememberedDevice | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr]   = useState<string>("");
   const [snaps, setSnaps] = useState<SnapInfo[]>([]);
@@ -85,17 +94,24 @@ export function LiveTab() {
     api.listDevices().then((d) => {
       const list = d.devices || [];
       setDevices(list);
-      const saved = (() => { try { return localStorage.getItem(DEVICE_ID_KEY) || ""; } catch { return ""; } })();
-      const wanted = audioDevice ? String(audioDevice)
-                   : saved && list.some((x) => String(x.id) === saved) ? saved
-                   : (list.find((x) => x.default)?.id ?? list[0]?.id ?? "");
-      setSelectedDevice(String(wanted));
+      try { localStorage.removeItem(OLD_DEVICE_ID_KEY); } catch {}
+      const remembered = readRememberedDevice(readStored(DEVICE_KEY));
+      const pick = pickDevice(list, remembered, audioDevice);
+      setSelectedDevice(pick.id);
+      setDeviceMissing(pick.missing);
     }).catch(() => {});
   }, [audioDevice]);
 
-  useEffect(() => {
-    if (selectedDevice) { try { localStorage.setItem(DEVICE_ID_KEY, selectedDevice); } catch {} }
-  }, [selectedDevice]);
+  // The device the operator picks, or starts on, is remembered by its name.
+  const rememberSelected = (id: string) => {
+    const d = devices.find((x) => String(x.id) === id);
+    if (d) writeStored(DEVICE_KEY, rememberDevice(d));
+  };
+  const chooseDevice = (id: string) => {
+    setSelectedDevice(id);
+    setDeviceMissing(null);
+    rememberSelected(id);
+  };
 
   // ── Stage scaling ────────────────────────────────────────────
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -164,14 +180,19 @@ export function LiveTab() {
           model:                settings.sarvamModel,
           high_vad_sensitivity: settings.sarvamHighVad,
           vad_signals:          settings.sarvamVadSignals,
+          force_flush_sec:      settings.sarvamForceFlushSec,
+          min_coverage:         settings.sarvamMinCoverage,
+          lag_limit_sec:        settings.sarvamLagLimitSec,
         },
         gate: {
           silence_threshold: settings.silencePct / 100.0,
           hangover_sec:      settings.hangoverSec,
         },
       };
-      if (audioSource === "device") body.device = selectedDevice;
-      else                          body.file   = audioFile;
+      if (audioSource === "device") {
+        Object.assign(body, startDevice(devices, selectedDevice));
+        rememberSelected(selectedDevice);
+      } else body.file = audioFile;
       await api.startCapture(body);
     } catch (e: any) {
       setErr(String(e.message || e));
@@ -354,11 +375,14 @@ export function LiveTab() {
               <select
                 id="device"
                 value={selectedDevice}
-                onChange={(e) => setSelectedDevice(e.target.value)}
+                onChange={(e) => chooseDevice(e.target.value)}
                 disabled={running}
                 className="h-9 rounded-md border border-border bg-surface px-3 text-sm disabled:opacity-50"
               >
                 {devices.length === 0 && <option value="">No devices found</option>}
+                {devices.length > 0 && !selectedDevice && (
+                  <option value="" disabled>Choose an input</option>
+                )}
                 {devices.map((d) => (
                   <option
                     key={d.id}
@@ -371,6 +395,16 @@ export function LiveTab() {
                   </option>
                 ))}
               </select>
+              {deviceMissing && !selectedDevice && (
+                <p className="flex items-start gap-1.5 text-xs text-warn">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    {deviceMissing.name}
+                    {deviceMissing.hostApi ? ` (${deviceMissing.hostApi})` : ""} was
+                    used last time and is not in the list now. Choose the input to use.
+                  </span>
+                </p>
+              )}
             </div>
           ) : (
             <div className="flex flex-col gap-1.5">

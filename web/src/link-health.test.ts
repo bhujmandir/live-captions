@@ -5,7 +5,7 @@ import {
 } from "./link-health";
 import { VirtualClock } from "./testing";
 
-// Issue #57, outage 1: the server was not running for 98 minutes and the
+// 3 September, outage 1: the server was not running for 98 minutes and the
 // hall screen looked exactly the way it looks when nobody is speaking —
 // empty. Nobody in the sabha, and nobody at the desk, could tell a quiet
 // katha from a dead one.

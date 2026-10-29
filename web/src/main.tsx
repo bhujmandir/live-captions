@@ -38,7 +38,7 @@ async function boot() {
   // costs everything: a server that accepts the socket and then never
   // answers leaves the hall screen with no React mounted at all. Not just no
   // captions — nothing able to SAY there are no captions, which is the exact
-  // failure issue #57 is about. Render first; apply the config if and when
+  // failure of the 3 September outage. Render first; apply the config if and when
   // it turns up.
   if (isOverlay) {
     root.render(
