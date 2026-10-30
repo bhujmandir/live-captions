@@ -63,9 +63,9 @@ type State = {
   // 🔴 The unit is a LINE, not a block. The block model replaced each caption
   // wholesale, so the eye finished the last line, the screen blanked and
   // refilled, and the reader started again with no thread back to what they
-  // had just read. The owner asked for the thread: "2 on the screen and 3rd 1
-  // is on the queue and 4th one is being constructed ... I want the text to
-  // scroll up in a queue as the next line is generated".
+  // had just read. The scroll keeps the thread: two on the screen, a third on
+  // the queue and a fourth being constructed, the text scrolling up in a
+  // queue as the next line is generated.
   //
   // Bounded by `maxVisibleLines`: a new line enters at the END and the oldest
   // falls off the front, which is the scroll.
@@ -73,7 +73,7 @@ type State = {
   // Complete lines waiting their turn, oldest first.
   //
   // ⚠️ BOUNDED, and the bound is the lateness bound. One line queued is the
-  // shape the owner asked for; `MAX_QUEUED_LINES` is the ceiling past which
+  // display's shape; `MAX_QUEUED_LINES` is the ceiling past which
   // the oldest queued line is dropped and counted. A queue allowed to grow is
   // the Day 2 Morning fault rebuilt deliberately — that was 45-60s behind the
   // speaker and getting worse.
@@ -86,8 +86,8 @@ type State = {
   // 🔴 A half-built line NEVER reaches the screen. That is the central rule of
   // this display: the sabha reads whole lines appearing, never words
   // assembling themselves. A line is complete when it fills the measured width
-  // OR when the text building it ends a sentence — the owner settled the
-  // second: "Push the short 1 up". Neither waits for the other.
+  // OR when the text building it ends a sentence, in which case it goes up
+  // short. Neither waits for the other.
   building: string;
   // Which caption the arriving text belongs to. Increments once per FINAL, and
   // exists only to group a sentence's lines together in the queue so the bound
@@ -260,8 +260,8 @@ export const CAPTION_CLEAR_AFTER_MS = Math.round(DEFAULT_SETTINGS.captionMaxDwel
 //
 // 1.5s is the broadcast minimum for a line and sits comfortably under the
 // ~1.9s per-line interval measured on Day 3 (3.83s median between captions,
-// commonly two lines each). Settling it against the recorded katha audio is
-// #50's job, not a number to nudge by feel.
+// commonly two lines each). Settle it against the recorded katha audio, not
+// by nudging the number by feel.
 export const LINE_MIN_DWELL_MS = 1500;
 
 // How long text that has not filled a line waits before it is pushed up anyway.
@@ -283,10 +283,10 @@ export const LINE_ORPHAN_MS = 2600;
 // The CEILING on lines waiting for the screen, not the working depth.
 //
 // 🔴 Read as a target this number looks wrong, and it has been read that way:
-// the owner's shape is one queued line — "3rd 1 is on the queue" — and spec
-// #56 says so. One IS the working depth; the queue sits at one line almost
-// always. Four is the point at which the tool stops keeping up and starts
-// dropping, which the same paragraph of #56 asks for in the same breath:
+// the display's shape is one queued line — the third, on the queue. One IS
+// the working depth; the queue sits at one line almost always. Four is the
+// point at which the tool stops keeping up and starts dropping, and the rule
+// for that is part of the same shape:
 // "The pipeline may hold more only up to an explicit maximum; beyond it the
 // oldest queued line is dropped and counted."
 //
@@ -315,9 +315,9 @@ function recordShown(shown: State["shownLines"], text: string, at: number) {
 // Punctuation that ends a unit of speech, in both scripts the tool handles.
 //
 // A caption ending here is finished, so whatever it leaves part-way through a
-// line is complete too and goes up short — the owner's decision, 2026-09-03:
-// "Push the short 1 up". A caption released by the server's max-wait ceiling
-// mid-sentence ends without one, and its remainder keeps building instead.
+// line is complete too and goes up short. A caption released by the server's
+// max-wait ceiling mid-sentence ends without one, and its remainder keeps
+// building instead.
 const ENDS_SENTENCE = /[.!?।॥]["')\]]*\s*$/;
 
 /**
@@ -539,10 +539,10 @@ export const captionStore: StateCreator<State> = (set, get) => ({
   pushFinal: (text, raw, rulesFired, now = Date.now()) => set((st) => {
     // A ROLLING SCROLL OF WHOLE LINES.
     //
-    // The owner settled this display model on Day 3, after watching the block
-    // model in the hall: "2 on the screen and 3rd 1 is on the queue and 4th
-    // one is being constructed ... I want the text to scroll up in a queue as
-    // the next line is generated. Only full line should be pushed upwards".
+    // This display model was settled on Day 3, after watching the block model
+    // in the hall: two on the screen, a third on the queue and a fourth being
+    // constructed; the text scrolls up in a queue as the next line is
+    // generated, and only a full line is pushed upwards.
     //
     // So an arrival never goes straight to the screen. It is appended to
     // whatever line is still being built, the splitter peels off every line
@@ -579,7 +579,7 @@ export const captionStore: StateCreator<State> = (set, get) => ({
     const parts = source ? st.splitCaption(source) : [];
 
     // A caption that ends a sentence is finished, so its last part is complete
-    // even if it is short — "Push the short 1 up", the owner, 2026-09-03. One
+    // even if it is short, and goes up short. One
     // released mid-sentence on the server's max-wait ceiling has not finished,
     // so its remainder keeps building and the next arrival continues it.
     const finished = ENDS_SENTENCE.test(incoming);
@@ -672,8 +672,7 @@ export const captionStore: StateCreator<State> = (set, get) => ({
     // first: that floor is what stops the scroll outrunning the hall.
     //
     // 🔴 Only complete lines are ever here — `building` is not a candidate.
-    // Never push a half-built line up: the owner's rule, and the one this
-    // display exists to keep.
+    // Never push a half-built line up: the rule this display exists to keep.
     const screenIsFree = st.visibleLines.length === 0 || now - st.lineShownAt >= minDwellMs;
     if (st.lineQueue.length > 0 && screenIsFree) {
       const next = st.lineQueue[0];

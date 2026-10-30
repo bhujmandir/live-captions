@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live Gujarati→English captions via Sarvam Saaras v3 streaming.
+"""Live Gujarati→English captions via Sarvam Saaras v4 streaming.
 
 Usage:
     # from a wav file (real-time paced):
@@ -110,7 +110,7 @@ async def run(audio_gen, out_file=None):
 
     try:
         async with client.speech_to_text_streaming.connect(
-            model="saaras:v3",
+            model="saaras:v4",
             mode="translate",
             language_code="gu-IN",
             sample_rate=16000,

@@ -262,8 +262,7 @@ def test_a_short_line_is_still_released_by_the_clock():
 # roughly 35-40 words, which needs about 13 seconds to read at normal subtitle
 # reading speed — and captions arrive about every 4.0s on this speaker. So the
 # shipped default permitted captions that could not be read before they were
-# replaced, and the owner reported exactly that from the live stream as text
-# "cutting off".
+# replaced, and the live stream showed exactly that as text "cutting off".
 #
 # No display timer can fix it: a caption that needs 13s in a 4s slot is
 # unreadable however long it is held, because holding it longer only puts the

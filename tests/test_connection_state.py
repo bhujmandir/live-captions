@@ -61,7 +61,7 @@ def link_states(messages: list[dict]) -> list[tuple[str, str | None]]:
 
 async def test_a_dropped_connection_is_announced_as_a_fault_and_blanks_the_overlay(
         floor, clock, broadcaster, state):
-    """The defect this ticket exists to fix, end to end.
+    """The defect this file exists to pin down, end to end.
 
     The service fails mid-katha the way a network fault does. Three things
     have to follow: the link is announced as lost rather than left looking
@@ -364,7 +364,7 @@ async def test_a_session_that_lasted_resets_the_backoff_a_session_that_did_not_d
     # floor is only one of the shapes it takes. When the healthy session has
     # already outlasted the floor, nothing is owed and the supervisor waits
     # not at all — which is the ideal outcome, and was being reported as a
-    # failure on the machine where it actually happened (mandir PC, #27).
+    # failure on the machine where it actually happened (the mandir PC).
     # What must never appear here is a grown backoff, which would be seconds.
     assert waits.delays[0] <= floor + 1e-6, (
         f"a session that ran for {live_captions.HEALTHY_SESSION_SEC}s did not "

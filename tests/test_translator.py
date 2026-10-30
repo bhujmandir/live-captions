@@ -10,9 +10,13 @@ The HTTP call is not tested here. What is tested is everything around it:
 what we ask for, what we do with the answer, and — most important for a live
 hall — what happens when the answer does not come.
 """
+import os
+
 import pytest
 
 import live_captions as lc
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ── the request ──────────────────────────────────────────────────────────
@@ -478,3 +482,19 @@ def test_the_reachable_translator_is_sarvam_when_sarvam_is_chosen(monkeypatch):
     monkeypatch.setattr(lc, "GEMINI_API_KEY", "a-key")
     assert lc.effective_translator("a-key") == "sarvam", \
         "a key lying around does not put Gemini in the path"
+
+
+# ── the shipped glossary ─────────────────────────────────────────────────
+#
+# The first glossary was written from one Vachanamrut reading, and every
+# term in it reaches every line. Over the katha week the translator put
+# "cursed intellect" on screen about 28 times and "conviction" 20 times with
+# neither word said nearby, and built a stock sentence out of the curse and
+# the avgun gloss. A term belongs here only if the speaker uses it all week.
+
+def test_the_shipped_glossary_carries_no_single_passage_terms():
+    _, terms = lc.load_glossary(os.path.join(REPO, "glossary.json"))
+    assert terms, "the shipped glossary should load"
+    for gu in ("શાપિત", "શાપિત બુદ્ધિ", "નિશ્ચય"):
+        assert gu not in terms
+    assert "flaw" not in terms["અવગુણ"]

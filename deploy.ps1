@@ -10,9 +10,8 @@
     WRITTEN AND REASONED ON macOS, NOT EXECUTED ON WINDOWS. Every command
     below is believed correct from documented tool behaviour, not proven by
     running it. See WINDOWS.md, section "What is unverified", for the exact
-    list of claims that still need confirming on the real mandir PC
-    (tracked as issue #2, runs-on:mandir-pc). Treat any failure here as a
-    normal bug report, not a surprise.
+    list of claims that still need confirming on the real mandir PC. Treat
+    any failure here as a normal bug report, not a surprise.
 
 .PARAMETER NoStart
     Install only; don't start the server.
@@ -20,6 +19,22 @@
 .PARAMETER StartOnly
     Skip the install phase and just start the server (this is what
     start-captions.bat calls day to day).
+
+.PARAMETER NoBrowser
+    Never open the operator page. The logon task passes this: it restarts the
+    server after a crash, and a browser tab appearing over vMix mid-katha is
+    worse than none. The desk opens http://localhost:8765/ by hand.
+
+.PARAMETER Supervise
+    Keep the server running: when it exits non-zero (a crash), wait 10 s and
+    start it again, forever; when it exits 0 (stop-captions.bat), stop too.
+    While another captions server already holds the port, watch it and start
+    one if it goes. The logon task passes this (with -StartOnly -NoBrowser)
+    because Task Scheduler's own restart on failure is reported to fire only
+    when a task fails to launch, not when the program exits non-zero; that
+    setting stays as a backup. Never opens a browser. Decisions go to
+    logs\supervisor-<date>.log (a fortnight kept); the server writes its own
+    log as always.
 
 .PARAMETER Port
     Server port. Defaults to 8765.
@@ -33,6 +48,8 @@
 param(
     [switch]$NoStart,
     [switch]$StartOnly,
+    [switch]$NoBrowser,
+    [switch]$Supervise,
     [int]$Port = 8765
 )
 
@@ -72,6 +89,9 @@ function Sync-PathFromRegistry {
 }
 
 $LogonTaskName = "LiveCaptions"
+# The gate that follows vMix's overlay 2 button. Without it the desk's
+# button starts nothing.
+$GateTaskName = "LiveCaptionsOverlayGate"
 # Scaffolding left on the mandir PC on 3 September: a one-shot task with a
 # start time in the past, so it never re-fires, currently the only thing
 # holding the server up. It must be named here, or this script tells a
@@ -80,47 +100,66 @@ $LogonTaskName = "LiveCaptions"
 $AdhocTaskName = "LiveCaptionsAdhoc"
 
 function Show-LogonTaskState {
-    # Issue #57. On 3 September this machine went to katha with no logon task
+    # On 3 September this machine went to katha with no logon task
     # registered, the server therefore never started, and the hall had no
     # captions for 98 minutes. Nothing anywhere said so. The task had been
     # "set up" — register-startup-task.ps1 had failed with Access is denied
     # and nobody read the error.
     #
     # So every run of this script now states, out loud, whether the machine
-    # will start the server by itself. It is a WARNING and never fatal: a
-    # katha with a hand-started server beats a script that refuses to run
-    # twenty minutes before a katha.
-    $task  = $null
+    # will start the server AND the overlay gate by itself, and whether
+    # either comes back after it stops (a task with RestartCount 0 died with
+    # its window on 23 October). It is a WARNING and never fatal: a katha
+    # with a hand-started server beats a script that refuses to run twenty
+    # minutes before a katha.
+    $wanted = @(
+        @{ Name = $LogonTaskName; Job = "the captions server" },
+        @{ Name = $GateTaskName;  Job = "the overlay 2 button gate (the desk's button starts nothing without it)" }
+    )
+    $found = @{}
     $adhoc = $null
     try {
-        $task  = Get-ScheduledTask -TaskName $LogonTaskName -ErrorAction SilentlyContinue
+        foreach ($w in $wanted) {
+            $found[$w.Name] = Get-ScheduledTask -TaskName $w.Name -ErrorAction SilentlyContinue
+        }
         $adhoc = Get-ScheduledTask -TaskName $AdhocTaskName -ErrorAction SilentlyContinue
     } catch {
         # Get-ScheduledTask is absent on some Windows editions. Not knowing is
         # not the same as knowing it is missing, and saying "MISSING" here
         # would train people to ignore the banner that matters.
-        Warn "Cannot check the logon task on this Windows edition ($($_.Exception.Message))."
+        Warn "Cannot check the logon tasks on this Windows edition ($($_.Exception.Message))."
         Write-Host "    Check by hand:  schtasks /query /tn $LogonTaskName"
+        Write-Host "                    schtasks /query /tn $GateTaskName"
         return
     }
 
-    if ($task -and $task.State -ne "Disabled") {
-        Ok "Autostart: task '$LogonTaskName' is registered ($($task.State)) - the server starts at logon."
-        if ($adhoc) {
-            Warn "'$AdhocTaskName' is still present. It is the 3 September scaffolding and is now"
-            Write-Host "    redundant. Remove it:  schtasks /delete /tn $AdhocTaskName /f"
+    $problems = @()
+    foreach ($w in $wanted) {
+        $task = $found[$w.Name]
+        if (-not $task) {
+            $problems += "The logon task '$($w.Name)' is NOT registered: $($w.Job) will not start at logon."
+        } elseif ($task.State -eq "Disabled") {
+            $problems += "The logon task '$($w.Name)' is registered but DISABLED: $($w.Job) will not start at logon."
+        } else {
+            Ok "Autostart: task '$($w.Name)' is registered ($($task.State)) - starts $($w.Job) at logon."
+            if ($task.Settings.RestartCount -lt 1) {
+                Warn "'$($w.Name)' does NOT restart if it stops. Re-run register-startup-task.ps1 to replace it."
+            }
         }
-        return
     }
+    if ($adhoc) {
+        Warn "'$AdhocTaskName' is still present. It is the 3 September scaffolding and is now"
+        Write-Host "    redundant. Remove it:  schtasks /delete /tn $AdhocTaskName /f"
+    }
+    if ($problems.Count -eq 0) { return }
 
-    $why = if ($task) { "is registered but DISABLED" } else { "is NOT registered" }
     Write-Host ""
     Write-Host "  ############################################################" -ForegroundColor Red
     Write-Host "  ##  AUTOSTART IS OFF - THIS PC WILL GO TO KATHA SILENT     ##" -ForegroundColor Red
     Write-Host "  ############################################################" -ForegroundColor Red
-    Write-Host "  The logon task '$LogonTaskName' $why." -ForegroundColor Red
-    Write-Host "  Nobody logging in will start the captions server. On 3 September" -ForegroundColor Red
-    Write-Host "  that cost the hall 98 minutes of no captions (issue #57)." -ForegroundColor Red
+    foreach ($p in $problems) { Write-Host "  $p" -ForegroundColor Red }
+    Write-Host "  Nobody logging in will start what is missing. On 3 September" -ForegroundColor Red
+    Write-Host "  that cost the hall 98 minutes of no captions." -ForegroundColor Red
     Write-Host ""
     if ($adhoc) {
         Write-Host "  NOTE: '$AdhocTaskName' exists - the one-shot left behind on 3 September." -ForegroundColor Yellow
@@ -310,31 +349,89 @@ if ($StartOnly) {
     Show-LogonTaskState
 }
 
-Hdr "Port check"
-$inUse = $false
-try {
-    $inUse = [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-} catch {
-    # Get-NetTCPConnection isn't present on every Windows edition; fall back
-    # to netstat, which is universally available.
-    $inUse = (netstat -ano | Select-String ":$Port\s.*LISTENING") -ne $null
-}
-if ($inUse) {
-    # Almost always this is OUR OWN server, already started by the logon task
-    # — which is the normal daily path, not a fault. Telling the operator it
-    # is broken and handing them a command to type, at the moment everything
-    # is working, is the worst thing this script can do. Ask the port who it
-    # is before assuming the worst.
-    $ours = $false
+function Get-PortState {
+    # "free", "ours" (the captions server answers on it) or "other" (something
+    # else holds it). Almost always "ours" means the logon task already started
+    # it - the normal daily path, not a fault - so ask the port who it is
+    # before assuming the worst.
+    param([int]$P)
+    $inUse = $false
     try {
-        $resp = Invoke-WebRequest -Uri "http://localhost:$Port/api/config" `
+        $inUse = [bool](Get-NetTCPConnection -LocalPort $P -State Listen -ErrorAction SilentlyContinue)
+    } catch {
+        # Get-NetTCPConnection isn't present on every Windows edition; fall back
+        # to netstat, which is universally available.
+        $inUse = (netstat -ano | Select-String ":$P\s.*LISTENING") -ne $null
+    }
+    if (-not $inUse) { return "free" }
+    try {
+        $resp = Invoke-WebRequest -Uri "http://localhost:$P/api/config" `
                                   -UseBasicParsing -TimeoutSec 3
-        $ours = ($resp.StatusCode -eq 200)
-    } catch { $ours = $false }
+        if ($resp.StatusCode -eq 200) { return "ours" }
+    } catch { }
+    return "other"
+}
 
-    if ($ours) {
-        Ok "The captions server is already running on port $Port - opening it."
-        Start-Process "http://localhost:$Port/"
+$RestartDelaySec = 10
+$SupervisorLogDays = 14
+
+function Write-SupervisorLog {
+    # The supervisor's own record: why the server was started again, and when.
+    # One file per day, so a katha's record is not overwritten by the next
+    # start; files older than a fortnight go.
+    param([string]$Msg)
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Msg"
+    Write-Host $line
+    try {
+        $dir = Join-Path $CaptionsDir "logs"
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        Add-Content -Path (Join-Path $dir "supervisor-$(Get-Date -Format 'yyyy-MM-dd').log") -Value $line -Encoding UTF8
+        Get-ChildItem -Path $dir -Filter "supervisor-*.log" |
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$SupervisorLogDays) } |
+            Remove-Item -ErrorAction SilentlyContinue
+    } catch { }
+}
+
+if ($Supervise) {
+    # The logon task's way of running the server. The port is looked at
+    # before EVERY launch, as the one-shot path below does, so a server that
+    # is still up is never doubled.
+    Write-SupervisorLog "supervising the captions server on port $Port"
+    $lastNote = ""
+    while ($true) {
+        $state = Get-PortState $Port
+        if ($state -eq "free") {
+            $lastNote = ""
+            Write-SupervisorLog "starting the captions server"
+            uv run python live_captions.py --port $Port
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+                Write-SupervisorLog "server stopped cleanly (exit 0): not restarting"
+                exit 0
+            }
+            Write-SupervisorLog "server exited $code, restarting in $RestartDelaySec s"
+        } else {
+            $note = if ($state -eq "ours") {
+                "a captions server is already running on port $Port: watching it"
+            } else {
+                "port $Port is held by something that is not the captions server: waiting for it to free"
+            }
+            if ($note -ne $lastNote) { Write-SupervisorLog $note; $lastNote = $note }
+        }
+        Start-Sleep -Seconds $RestartDelaySec
+    }
+}
+
+Hdr "Port check"
+$portState = Get-PortState $Port
+if ($portState -ne "free") {
+    if ($portState -eq "ours") {
+        if (-not $NoBrowser) {
+            Ok "The captions server is already running on port $Port - opening it."
+            Start-Process "http://localhost:$Port/"
+        } else {
+            Ok "The captions server is already running on port $Port."
+        }
         exit 0
     }
 
@@ -362,16 +459,24 @@ Write-Host ""
 # line above the server guaranteed a connection error and a manual refresh.
 # The poll runs in a background job so the server keeps the foreground and
 # Ctrl+C still stops it.
-Start-Job -ScriptBlock {
-    param($p)
-    for ($i = 0; $i -lt 60; $i++) {
-        try {
-            Invoke-WebRequest -Uri "http://localhost:$p/api/config" `
-                              -UseBasicParsing -TimeoutSec 2 | Out-Null
-            Start-Process "http://localhost:$p/"
-            return
-        } catch { Start-Sleep -Milliseconds 500 }
-    }
-} -ArgumentList $Port | Out-Null
+if (-not $NoBrowser) {
+    Start-Job -ScriptBlock {
+        param($p)
+        for ($i = 0; $i -lt 60; $i++) {
+            try {
+                Invoke-WebRequest -Uri "http://localhost:$p/api/config" `
+                                  -UseBasicParsing -TimeoutSec 2 | Out-Null
+                Start-Process "http://localhost:$p/"
+                return
+            } catch { Start-Sleep -Milliseconds 500 }
+        }
+    } -ArgumentList $Port | Out-Null
+}
 
 uv run python live_captions.py --port $Port
+# Hand the server's exit code to whoever started this script. A native command
+# that fails does not end a PowerShell script with its code. The logon task
+# supervises the server itself (-Supervise above); this keeps a hand run honest
+# and is the signal Task Scheduler's own restart, the backup, would act on. A
+# deliberate stop (stop-captions.bat) exits 0 and stays stopped.
+exit $LASTEXITCODE

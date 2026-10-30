@@ -30,7 +30,8 @@ from .fakes import (
 
 
 
-async def run_supervisor(*, audio, broadcaster, state, client=None, timeout=30.0):
+async def run_supervisor(*, audio, broadcaster, state, client=None, timeout=30.0,
+                         sarvam_cfg=None):
     """Run `sarvam_loop` to completion, exactly as `/api/start` does.
 
     `client=None` is the production path — the supervisor builds its own.
@@ -39,7 +40,7 @@ async def run_supervisor(*, audio, broadcaster, state, client=None, timeout=30.0
     await asyncio.wait_for(
         live_captions.sarvam_loop(
             audio, broadcaster, False, stop_event, state,
-            sarvam_cfg={"model": "saaras:v3"},
+            sarvam_cfg={"model": "saaras:v3"} if sarvam_cfg is None else sarvam_cfg,
             client=client,
         ),
         timeout=timeout,
@@ -95,10 +96,10 @@ async def test_speech_is_captioned_and_silence_is_gated(clock, broadcaster, stat
         6.0, 6.5,             # speech resumes
     ]
 
-    # This is the defect the rest of the spec exists to fix: across a pause of
-    # only five seconds the tool sends the service nothing for four of them.
-    # #11 adds a keep-alive frame and will bring this gap down to the
-    # keep-alive interval — when it does, this number is expected to change,
+    # Across a pause of only five seconds the tool sends the service nothing
+    # for four of them. That is inside the keep-alive interval, so no
+    # keep-alive frame goes out; a long silence is the test further down. If
+    # the keep-alive interval ever drops below this gap, this number changes,
     # and that is the test doing its job.
     assert max(session.gaps) == 4.0
 
@@ -201,7 +202,7 @@ async def test_dropped_connection_reconnects_and_keeps_captioning(
 
 async def test_a_five_minute_silence_costs_five_minutes_of_audio_not_of_wall_clock(
         clock, broadcaster, state):
-    """The behaviour the whole spec turns on, and the proof the harness scales.
+    """The behaviour the keep-alive turns on, and the proof the harness scales.
 
     A long event contains gaps far longer than a minute — music, a reading, a
     break. Scripted here as five minutes of quiet room between two bursts of
@@ -214,8 +215,8 @@ async def test_a_five_minute_silence_costs_five_minutes_of_audio_not_of_wall_clo
     never idle long enough for the service to close it.
 
     The assertions below are shaped by what this test used to prove. Before
-    #11 the tool sent nothing at all for the whole pause and the gap here was
-    the length of the silence; the count and the peak value are what stop that
+    the keep-alive the tool sent nothing at all for the whole pause and the
+    gap here was the length of the silence; the count and the peak value are what stop that
     regressing in either direction — too many frames means the gate stopped
     gating, room noise in the middle means it is forwarding the room, and a
     wider gap means the connection is being left to idle out again.
@@ -295,3 +296,157 @@ async def test_without_a_key_or_a_client_the_supervisor_refuses_to_start(
     assert "SARVAM_API_KEY not set" in caplog.text
     # It bailed before doing anything at all — no shutdown broadcast either.
     assert broadcaster.messages == []
+
+
+# ── which Saaras model a start connects on ───────────────────────────────────
+# v4 is the default since it was measured on katha audio: it connects on the
+# WebSocket path, ends every final with a full stop, and so releases captions
+# sooner. v3 stays selectable as the fallback.
+
+async def _connect_with(sarvam_cfg, clock, broadcaster, state):
+    client = FakeSarvamClient(sessions=[FakeSession(clock)])
+    await run_supervisor(
+        audio=scripted_audio([speech()], clock, broadcaster),
+        broadcaster=broadcaster, state=state, client=client, sarvam_cfg=sarvam_cfg,
+    )
+    return client.connect_kwargs[0]["model"]
+
+
+async def test_a_start_that_names_no_model_connects_on_saaras_v4(clock, broadcaster, state):
+    assert await _connect_with({}, clock, broadcaster, state) == "saaras:v4"
+
+
+async def test_a_withdrawn_model_falls_back_to_saaras_v4(clock, broadcaster, state):
+    # A browser whose saved settings predate the model clean-up still posts
+    # "saaras:v2", which the service refuses.
+    assert await _connect_with({"model": "saaras:v2"}, clock, broadcaster, state) == "saaras:v4"
+
+
+async def test_saaras_v3_is_still_honoured_as_the_fallback(clock, broadcaster, state):
+    assert await _connect_with({"model": "saaras:v3"}, clock, broadcaster, state) == "saaras:v3"
+
+
+def test_the_settings_list_offers_v4_first():
+    # The operator UI swaps an unknown stored model for the FIRST entry here,
+    # so the order is a default too, not just presentation.
+    assert [m["id"] for m in live_captions.SARVAM_MODELS] == ["saaras:v4", "saaras:v3"]
+
+async def test_a_service_that_never_closes_after_the_flush_does_not_hang_the_session(
+        monkeypatch, clock, broadcaster, state):
+    """The session ends on its own when the socket goes silent after a flush.
+
+    Replaying five minutes of katha, the audio ended and the socket then
+    sent nothing and closed nothing for 2h26m, until TCP gave up. Nothing in
+    the tool bounded that wait.
+
+    The fake here is the same service: `flush_ends_session=False` means the
+    flush is answered with neither data nor a close. Before the fix this test
+    does not fail an assertion — it never returns at all, and only
+    `run_supervisor`'s own timeout ends it.
+    """
+    monkeypatch.setattr(live_captions, "SOCKET_DRAIN_SEC", 0.05)
+
+    session = FakeSession(clock, flush_ends_session=False)
+    client = FakeSarvamClient(sessions=[session])
+
+    await run_supervisor(
+        audio=scripted_audio([speech(), speech()], clock, broadcaster),
+        broadcaster=broadcaster, state=state, client=client, timeout=5.0)
+
+    assert session.flushed, "the tool should have flushed when the audio ran out"
+
+
+async def test_a_trailing_transcript_after_the_flush_is_still_captioned(
+        monkeypatch, clock, broadcaster, state):
+    """The drain window is idle-based, so it never truncates a live service.
+
+    The risk in bounding the post-flush wait is cutting off the last words of
+    the katha. Here the service answers the flush with a transcript before
+    going silent, and that caption must still reach the browser — the window
+    only expires on silence, and every message restarts it.
+    """
+    monkeypatch.setattr(live_captions, "SOCKET_DRAIN_SEC", 0.5)
+
+    session = FakeSession(clock, flush_ends_session=False)
+
+    real_flush = session.flush
+
+    async def _flush_then_speak():
+        await real_flush()
+        session.emit_transcript("and that is the end of today's katha.")
+
+    session.flush = _flush_then_speak  # type: ignore[method-assign]
+    client = FakeSarvamClient(sessions=[session])
+
+    await run_supervisor(
+        audio=scripted_audio([speech(), speech()], clock, broadcaster),
+        broadcaster=broadcaster, state=state, client=client, timeout=5.0)
+
+    said = " ".join(m.get("text", "") for m in broadcaster.of_type("final"))
+    assert "end of today's katha" in said, f"trailing caption was lost: {said!r}"
+
+
+async def test_a_sender_that_dies_before_the_flush_still_ends_the_session(
+        monkeypatch, clock, broadcaster, state):
+    """The bound is armed by the sender STOPPING, not by the flush landing.
+
+    A sender that dies mid-audio never reaches `ws.flush()`. It sets
+    `stop_event`, but that alone cannot free a receive loop already parked on
+    the socket — nothing arrives to make it look. So the same 2h26m wait
+    is reachable by a second route, and keying the watchdog on the
+    flush would have left it open.
+    """
+    monkeypatch.setattr(live_captions, "SOCKET_DRAIN_SEC", 0.05)
+
+    class Wedged(FakeSession):
+        async def transcribe(self, **kw):
+            raise RuntimeError("SDK validation bug")
+
+    session = Wedged(clock, flush_ends_session=False)
+    client = FakeSarvamClient(sessions=[session])
+
+    await run_supervisor(
+        audio=scripted_audio([speech(), speech()], clock, broadcaster),
+        broadcaster=broadcaster, state=state, client=client, timeout=5.0)
+
+    assert not session.flushed, "the sender died, so it never got to flush"
+
+
+async def test_a_socket_that_never_stops_talking_is_still_bounded(
+        monkeypatch, clock, broadcaster, state):
+    """The idle window re-arms on every message — so it needs a ceiling too.
+
+    Without one, a service that emits anything at all just inside the idle
+    window holds the session open indefinitely while satisfying every check.
+    Nothing observed behaves that way, which is exactly the argument that was
+    made about the socket in the replay before it sat open for 2h26m.
+    """
+    monkeypatch.setattr(live_captions, "SOCKET_DRAIN_SEC", 0.02)
+    monkeypatch.setattr(live_captions, "SOCKET_DRAIN_MAX_SEC", 0.1)
+
+    session = FakeSession(clock, flush_ends_session=False)
+
+    async def _chatter():
+        """Emit forever, faster than the idle window can expire."""
+        while True:
+            session.emit_speech_signal("START_SPEECH")
+            await asyncio.sleep(0.005)
+
+    chatter: asyncio.Task | None = None
+    real_flush = session.flush
+
+    async def _flush_then_chatter():
+        nonlocal chatter
+        await real_flush()
+        chatter = asyncio.create_task(_chatter())
+
+    session.flush = _flush_then_chatter  # type: ignore[method-assign]
+    client = FakeSarvamClient(sessions=[session])
+
+    try:
+        await run_supervisor(
+            audio=scripted_audio([speech(), speech()], clock, broadcaster),
+            broadcaster=broadcaster, state=state, client=client, timeout=5.0)
+    finally:
+        if chatter is not None:
+            chatter.cancel()

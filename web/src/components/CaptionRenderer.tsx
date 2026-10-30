@@ -57,12 +57,16 @@ type Props = {
    *
    * It replaces `showGuides`, which every call site passed `false` from the
    * first commit onwards — so everything behind it was dead, including the
-   * "speaking …" cue a previous review asked for. The dashed outlines it
-   * used to gate are gone: `LiveTab` already draws both rectangles itself,
-   * with handles, via `DraggableRect`.
+   * "speaking …" cue. The dashed outlines it used to gate are gone: `LiveTab`
+   * already draws both rectangles itself, with handles, via `DraggableRect`.
    */
   desk?: boolean;
 };
+
+export const AI_LABEL_TEXT = "AI-generated subtitles";
+// Below the caption area, which ends at y=1030 in the hall layout.
+const AI_LABEL_RIGHT_PX = 60;
+const AI_LABEL_BOTTOM_PX = 14;
 
 export function CaptionRenderer({ stageScale, desk = false }: Props) {
   const settings         = useStore((s) => s.settings);
@@ -76,9 +80,9 @@ export function CaptionRenderer({ stageScale, desk = false }: Props) {
   const lineCharBudget   = useStore((s) => s.lineCharBudget);
   const linesDropped     = useStore((s) => s.linesDropped);
   const queuedCount      = useStore((s) => s.lineQueue.length);
-  // The two OFF-SCREEN rows, as text rather than as counts. They are what the
-  // owner described as "3rd 1 is on the queue and 4th one is being
-  // constructed": rendered, below the clip, never read by the hall.
+  // The two OFF-SCREEN rows, as text rather than as counts: the third line,
+  // on the queue, and the fourth, being constructed. Rendered, below the clip,
+  // never read by the hall.
   const queuedNext       = useStore((s) => s.lineQueue[0]?.text ?? "");
   const building         = useStore((s) => s.building);
   const buildingLen      = building.length;
@@ -327,7 +331,7 @@ export function CaptionRenderer({ stageScale, desk = false }: Props) {
     }
 
     if (prefersReducedMotion()) {
-      // The spec asks for this explicitly, and the degraded path already
+      // Reduced motion is honoured on purpose, and the degraded path already
       // exists: land on the resting position with no transition. Same lines,
       // same place, no movement.
       col.style.transition = "none";
@@ -483,7 +487,7 @@ export function CaptionRenderer({ stageScale, desk = false }: Props) {
               )}
               {/* The "still speaking" ellipsis rides the line being BUILT,
                 * which is off screen. The hall is never shown a sentence
-                * assembling itself — spec #56, user story 3 — and it does not
+                * assembling itself, ever — and it does not
                 * depend on that row having text yet, because a partial can be
                 * live before its first character has landed. */}
               {partialActive && i === column.buildingRow && (
@@ -495,7 +499,7 @@ export function CaptionRenderer({ stageScale, desk = false }: Props) {
       </div>
 
       {/* Rendered on EVERY surface, including the hall screen — which is the
-        * whole point. See OfflineNotice.tsx and issue #57: a dead server and
+        * whole point. See OfflineNotice.tsx: on 3 September a dead server and
         * a quiet katha produced the same empty rectangle for 98 minutes. */}
       <OfflineNotice
         x={settings.areaX}
@@ -524,6 +528,26 @@ export function CaptionRenderer({ stageScale, desk = false }: Props) {
           pointerEvents: "none",
         }}>
           speaking …
+        </div>
+      )}
+      {/* Inside the overlay so it can never be on air without the captions,
+        * or off air with them on. Last, so the panel can't cover it. Stage
+        * mode only: AREA mode and fit=width crop to the caption area, which
+        * this corner sits outside. right/bottom, not inset, for Chromium 51. */}
+      {settings.aiLabel && (
+        <div
+          style={{
+            position: "absolute",
+            right: AI_LABEL_RIGHT_PX, bottom: AI_LABEL_BOTTOM_PX,
+            fontFamily: "'Segoe UI', Arial, sans-serif",
+            fontWeight: 400, fontSize: 22, lineHeight: 1,
+            color: "#fff", opacity: 0.5,
+            textShadow: "0 0 3px rgba(0,0,0,.6)",
+            letterSpacing: 0.2,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {AI_LABEL_TEXT}
         </div>
       )}
     </div>

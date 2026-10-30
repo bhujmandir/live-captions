@@ -15,17 +15,27 @@ gcp-*.json
 # them at runtime. Don't track those edits.
 outputs.json
 vod-jobs.json
-# glossary.json is TRACKED again as of 2026-09-01. It was ignored because this
-# repo was public and the file names the event; both repos went private that
-# day, which removes the reason. Tracking it is now the point: the glossary is
-# the whole quality margin (a briefed model scores 24/24 on terminology, the
-# same model cold scores like the cheap one), it was surviving only as an
-# untracked file on one Windows PC, and it is the artefact a Gujarati reader
-# reviews. An unbacked-up file that nobody can review is the bigger risk.
+# rules.json is the live word rules, edited from the Rules tab. The tracked
+# starter is rules.starter.json; the server copies it to rules.json on first
+# run, so an update never overwrites a hall's own rules.
+rules.json
+# The overlay gate's hall settings. overlay-gate.example.json is the tracked
+# list of keys and defaults; a hall's own copy is its own.
+overlay-gate.json
+# glossary.json is TRACKED again as of 2026-09-01. It was ignored while this
+# project's repo was public, because the file names the event. The development
+# repo went private that day, which removed the reason there; the mandir repo
+# is public and tracks it too, because what the file holds is a katha's
+# vocabulary and nothing private (no keys, no names of people). Tracking it is
+# the point: the glossary is the whole quality margin (a briefed model scores
+# 24/24 on terminology, the same model cold scores like the cheap one), it was
+# surviving only as an untracked file on one Windows PC, and it is the artefact
+# a Gujarati reader reviews. An unbacked-up file that nobody can review is the
+# bigger risk.
 # glossary.example.json stays as the empty schema for a fresh deployment.
 #
 # Still true, and unchanged by any of this: NO KEYS IN TRACKED FILES. Private
-# is not a reason to relax .env.
+# is not a reason to relax .env, and a public repo is a reason to be stricter.
 
 # Operator logs. A deployment that redirects server output into the repo
 # leaves `?? logs/` in git status — the same invisible trap as the

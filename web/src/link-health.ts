@@ -2,11 +2,10 @@ import type { LinkState, LinkReason, Connection } from "./types";
 
 // Whether a surface should say out loud that it has lost the server.
 //
-// Issue #57 — see docs/how-it-works.md, "When the server is not there at all", for the
-// full account. In short: `main.tsx` composites a "server unreachable" panel
-// but deliberately suppresses it for `?overlay=1`, and the hall was left with
-// nothing to say for 98 minutes.
-//
+// The 3 September outage — see docs/how-it-works.md, "When the server is not
+// there at all", for the full account. In short: `main.tsx` composites a
+// "server unreachable" panel but deliberately suppresses it for `?overlay=1`,
+// and the hall was left with nothing to say for 98 minutes.
 // Both decisions live here, as pure functions, for one reason: the surface
 // that got this wrong renders inside vMix's Chromium 51, where none of this
 // can be run or inspected. Anything that cannot be asserted off the browser

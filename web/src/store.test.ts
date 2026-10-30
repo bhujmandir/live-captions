@@ -1,13 +1,13 @@
 // What the hall reads, over time.
 //
 // Every case here corresponds to something that actually went wrong on the
-// stream during the 53rd Patotsav, or to a property of the display the owner
-// settled after watching it. The overlay had no tests at all before this file.
+// stream during the 53rd Patotsav, or to a property of the display settled
+// after watching it. The overlay had no tests at all before this file.
 //
-// The display is a ROLLING SCROLL OF WHOLE LINES. The owner settled it on
-// Day 3: "2 on the screen and 3rd 1 is on the queue and 4th one is being
-// constructed ... I want the text to scroll up in a queue as the next line is
-// generated. Only full line should be pushed upwards."
+// The display is a ROLLING SCROLL OF WHOLE LINES, settled on Day 3: two on the
+// screen, a third on the queue and a fourth being constructed. The text
+// scrolls up in a queue as the next line is generated, and only a full line
+// is pushed upwards.
 
 import { describe, it, expect } from "vitest";
 import { overlayUnderTest, final, VirtualClock } from "./testing";
@@ -107,9 +107,8 @@ describe("the previous line is still on screen", () => {
 
 describe("only whole lines ever go up", () => {
   // 🔴 The central rule of this display: the sabha reads whole lines
-  // appearing, never words assembling themselves in front of them. The owner,
-  // on the block model that preceded it: "no loading inside the subs on
-  // screen".
+  // appearing, never words assembling themselves in front of them: nothing
+  // loads inside the captions on screen.
   it("never puts a part-built line on the screen", () => {
     const o = overlayUnderTest();
     o.setCharBudget(30);
@@ -162,8 +161,8 @@ describe("only whole lines ever go up", () => {
   });
 
   it("pushes a short last line up rather than holding it back", () => {
-    // The owner's decision, 2026-09-03: "Push the short 1 up". A line that
-    // ends mid-width because the sentence ended is complete.
+    // A line that ends mid-width because the sentence ended is complete, and
+    // goes up short.
     const o = overlayUnderTest();
     o.setCharBudget(60);
 

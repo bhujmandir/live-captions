@@ -45,9 +45,10 @@ export type Rule = {
 
 export type AudioDevice = {
   id: number;
-  name: string;
+  name: string;          // for display: the device's name and its host API
+  deviceName?: string;   // the name alone, as the driver reports it
   channels: number;
-  default: boolean;
+  default: boolean;      // the system default input
   hostApi?: string;
   // False when the driver refuses the tool's capture rate. Windows lists one
   // physical input once per host API under the same name, and not all of them

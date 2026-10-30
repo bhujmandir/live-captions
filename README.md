@@ -108,23 +108,43 @@ uv run python live_captions.py
 
 ```powershell
 # In PowerShell, from the folder you cloned into:
-.\deploy.ps1
+powershell -ExecutionPolicy Bypass -File deploy.ps1
 ```
 
-Then edit `.env`, and start the tool by double-clicking **`start-captions.bat`**.
+Then put your keys in `.env`. `deploy.ps1` leaves the server running in its own window; stop it
+with `stop-captions.bat`, and make the PC run the captions by itself:
 
-`register-startup-task.ps1` will make it start on its own when the machine logs on, which is
-what you want on a dedicated control-room PC.
+```powershell
+powershell -ExecutionPolicy Bypass -File register-startup-task.ps1 -StartNow
+```
+
+Setting up a whole hall PC step by step, with a check after each step? Follow
+[`SETUP.md`](SETUP.md); what follows is the short form.
+
+That registers two background jobs for the Windows user who runs katha: the **captions
+server** and the **overlay gate**, the small program that starts the captions when the desk
+presses vMix's overlay 2 button and stops them when it is turned off. Both start at logon with
+no window, and start again if they stop.
+
+The last step is vMix: add a browser input titled `Captions Overlay`, put it on overlay 2 and
+save the preset. It is spelled out in [`WINDOWS.md`](WINDOWS.md#setting-up-vmix-once-per-vmix-preset).
+After that a katha needs nobody at the PC: the desk presses overlay 2.
+
+- **At the desk:** print [`DESK-CHECKLIST.md`](DESK-CHECKLIST.md) and keep it next to vMix.
+- **Before the first katha:** do the dry run in `WINDOWS.md`, on a day with no katha.
+- **Without the logon tasks** you can still start the server by double-clicking
+  **`start-captions.bat`**.
 
 > **Be honest with yourself about what is proven here.** `deploy.ps1` broke in four separate
-> places the first time it was ever run on a real Windows machine — and three of those four
+> places the first time it was ever run on a real Windows machine, and three of those four
 > printed `OK` while failing. They are fixed, and the fixed version has been run from a clean
-> checkout. But `start-captions.bat` and `register-startup-task.ps1` have **never been run in
-> anger**, because the machine they were written for was running a live broadcast and could
-> not be restarted. Try them on a day that does not matter.
+> checkout. The two logon tasks, their restart on failure and the overlay gate's recovery of a
+> blank overlay were written and tested on a Mac against fakes, and **have not yet been run on
+> Windows or against a real vMix**. The dry run in `WINDOWS.md` is how that gets proven.
 >
-> Related: Windows Task Scheduler reports a task as **Running** even after the server inside
-> it has died. Do not use that as your check that captions are alive. Look at the captions.
+> Related: Windows Task Scheduler reports a task as **Running** even after the program inside
+> it has died. Do not use that as your check that captions are alive. Look at the captions, and
+> at the two log files in `logs\`.
 
 `WINDOWS.md` has the longer sequence and the full list of what has and has not been verified.
 
@@ -137,7 +157,9 @@ what you want on a dedicated control-room PC.
 **And do not close the server's window.** During a live event the captions died twice in one
 evening because a console window appeared, said nothing about what it was, and the person who
 found it closed it — reasonably. On Windows, prefer `register-startup-task.ps1`, which runs the
-server with no window at all: what does not exist cannot be closed by someone tidying up.
+server with no window at all: what does not exist cannot be closed by someone tidying up. A
+server stopped with `stop-captions.bat` stays stopped; one that crashes is started again within
+a minute.
 
 A stray Ctrl+C is separately guarded:
 
@@ -274,7 +296,21 @@ http://<the machine's address>:8765/?overlay=1
 Point any browser source at that URL and it will composite over your video with a transparent
 background. The server listens on all network interfaces, so this works from another machine.
 
+**Out of the box** that URL shows **two lines** that scroll up line by line, on a 25% dark
+panel, with a small **"AI-generated subtitles"** label in the bottom-right corner. Add
+`&ailabel=0` to hide the label. Any setting in the URL wins over the defaults. If an old
+overlay URL carries `lines=1`, take it out, or you will get one line.
+
 **vMix** — add a **Web Browser** input with that URL, and place it on an overlay channel.
+vMix keeps the URL saved in its preset, not one changed by hand later, so put the settings you
+want in the URL itself and save the preset. The hall used `?overlay=1&lines=2&fs=64&fw=600&tbg=25&panel=1&ailabel=1`.
+The **overlay gate** (`tools/vmix/overlay_gate.py`, installed by `register-startup-task.ps1`)
+lets the desk's overlay 2 button start and stop the captions, and puts the page back when the
+overlay is on but has not loaded (vMix was opened before the server, say). Its input title,
+audio device name and the rest are in `overlay-gate.json` (copy `overlay-gate.example.json`;
+any key left out keeps its default). Set `device_name` to the hall's input: left empty, the
+gate starts on the server's default input. The step-by-step vMix setup, the settings and the gate's
+log are in [`WINDOWS.md`](WINDOWS.md#setting-up-vmix-once-per-vmix-preset).
 
 **OBS** — add a **Browser Source** with that URL, 1920×1080.
 
@@ -344,8 +380,8 @@ All in `.env`. Copy `.env.template` to get started; every line there is commente
 ## Running the tests
 
 ```bash
-uv run pytest -q          # 191 tests, about 18 seconds
-cd web && npx vitest run  # 160 tests, under a second
+uv run --extra dev pytest -q          # the Python suite, about 40 seconds
+cd web && npx vitest run  # the operator page's tests, a few seconds
 ```
 
 No network, no API key and no microphone are needed. A five-minute silence in the tests costs
@@ -372,8 +408,15 @@ Listed honestly. These are open at the time of writing and are **not** fixed.
 - **vMix restores its stored overlay URL when it restarts**, silently reverting any settings
   you put in that URL — and re-saving from vMix overwrites your change. If your caption
   settings keep reverting after a vMix restart, this is why.
-- **`start-captions.bat` and `register-startup-task.ps1` have never been run for real.** See
-  the Windows section.
+- **The two logon tasks have never been run on a Windows PC.** `register-startup-task.ps1`, the
+  restart on failure, and the overlay gate's recovery of a blank overlay are tested on a Mac
+  against fakes only. See the dry run in `WINDOWS.md`.
+- **A saved vMix preset is the only thing that keeps the overlay look across a vMix restart.**
+  The overlay gate navigates an input that has not loaded at all, but it does not rewrite a
+  URL that loads: set the URL in the input and save the preset once.
+- **Nothing alerts anyone** when the captions go silent on air (a muted mixer send looks like
+  a quiet speaker) or the hall screen is blank. The gate puts a blank overlay back, and logs
+  it; a person still has to look.
 - **Nobody who reads Gujarati has reviewed the glossary.** See the glossary section. This is
   the largest open risk in the whole project and it is not a software problem.
 

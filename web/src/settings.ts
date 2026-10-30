@@ -32,6 +32,17 @@ export type Settings = {
   sarvamModel: string;
   sarvamHighVad: boolean;           // high_vad_sensitivity
   sarvamVadSignals: boolean;        // vad_signals (drives partial …)
+  // Seconds of unbroken speech before the server asks Saaras to finalise what
+  // it has; 0 = wait for the speaker to pause. 4s took the hall's p90 from 7.7s
+  // to 6.3s and long lines from 14% to under 1% (6 Oct).
+  sarvamForceFlushSec: number;
+  // Lag watchdog: reconnect when Saaras finalises less than this share
+  // of the audio over 3 min, or sends a final this long after the audio
+  // stopped. Either at 0 = off.
+  sarvamMinCoverage: number;
+  sarvamLagLimitSec: number;
+  // Drawn by the overlay itself so it goes on and off air with the captions.
+  aiLabel: boolean;
   // Client-side audio gate (pre-filter before upload, saves Sarvam credits).
   silencePct: number;               // peak threshold, % of int16 full-scale
   hangoverSec: number;              // keep sending this long after last loud chunk
@@ -77,8 +88,8 @@ export type Settings = {
 // Layout presets — applied via the "preset" dropdown in the operator
 // settings drawer. Customising any field flips the preset to "custom".
 //
-// Every preset is TWO lines. The owner settled the shape on Day 3: "2 on the
-// screen and 3rd 1 is on the queue and 4th one is being constructed". Two
+// Every preset is TWO lines. The shape was settled on Day 3: two on the screen,
+// a third on the queue and a fourth being constructed. Two
 // lines is the shape, not a ceiling that varies by preset — the presets differ
 // in where the captions sit and how big they are, not in how much text the
 // sabha is asked to take in at once.
@@ -100,7 +111,8 @@ export const PRESETS: Record<"small" | "medium" | "large", Partial<Settings>> = 
 /**
  * Opacity the panel comes on at.
  *
- * The owner's own number: "make a 25% opacity background on the text".
+ * 25%: enough to separate white text from a lit murti or a white kurta, light
+ * enough to leave the picture behind it.
  */
 export const TEXT_PANEL_DEFAULT_OPACITY = 0.25;
 
@@ -113,11 +125,9 @@ export const DEFAULTS: Settings = {
   bg: "transparent",
   source: "gu-IN", target: "en-IN",
   layoutPreset: "medium",
-  // ON by default, at the owner's number: "Only full line should be pushed
-  // upwards and i need 25% capacity block background" (2026-09-03). The panel
-  // is part of the display he asked for, not an extra somebody switches on —
-  // and it had never once been on air, because the URL that carried it reverted
-  // every time vMix restarted.
+  // ON by default, at 25%. The panel is part of the display, not an extra
+  // somebody switches on — and it had never once been on air, because the URL
+  // that carried it reverted every time vMix restarted.
   textBgOpacity: TEXT_PANEL_DEFAULT_OPACITY,
   panelFixed: true,
   // 1.5s is the broadcast minimum for one line, and it sits under the ~1.9s
@@ -130,9 +140,13 @@ export const DEFAULTS: Settings = {
   // a hall-facing judgement rather than a measured value: a caption wiped
   // mid-read cannot be recovered, one held too long merely looks stale.
   captionMaxDwellSec: 12,
-  sarvamModel: "saaras:v3",
+  sarvamModel: "saaras:v4",
   sarvamHighVad: true,
   sarvamVadSignals: true,
+  sarvamForceFlushSec: 4,
+  sarvamMinCoverage: 0.4,
+  sarvamLagLimitSec: 20,
+  aiLabel: true,
   silencePct: 1.0,
   hangoverSec: 1.5,
   overlayFitWidth: false,
@@ -183,7 +197,7 @@ const STORAGE_KEY = "captions-settings";
  * 🔴 Why this exists: stored settings used to beat the defaults
  * unconditionally, so every new default shipped dead on arrival to every
  * machine that had ever saved — which is every machine that matters — and it
- * failed silently. The 25% panel of #56 reached the mandir PC as a bundle that
+ * failed silently. The 25% panel reached the mandir PC as a bundle that
  * had it on by default and a hall screen with no background behind the words,
  * no error anywhere, because a `captions-settings` written before the panel
  * existed still held `textBgOpacity: 0` and `panelFixed: false`. A reload does
@@ -196,6 +210,17 @@ export const SETTINGS_SCHEMA = 2;
 
 /** Where the stamp lives. Not a `Settings` field, so it never round-trips. */
 const SCHEMA_FIELD = "__schema";
+
+/**
+ * The model default a stored `sarvamModel` was chosen against.
+ *
+ * The operator UI posts its stored model on every start, so a new model
+ * default would otherwise reach no machine that has ever saved. A schema bump
+ * fixes that at the cost of the whole saved layout; this moves only the model,
+ * and only when the default it was saved under has changed. An operator who
+ * picks the fallback under the current default keeps it.
+ */
+const MODEL_DEFAULT_FIELD = "__sarvamDefault";
 
 /**
  * Fold a stored settings blob onto the defaults, discarding anything an older
@@ -216,6 +241,9 @@ export function hydrateStored(raw: string | null): Settings {
     if (!stored || stored[SCHEMA_FIELD] !== SETTINGS_SCHEMA) return s;
     for (const k of Object.keys(s) as (keyof Settings)[]) {
       if (k in stored) (s as any)[k] = stored[k];
+    }
+    if (stored[MODEL_DEFAULT_FIELD] !== DEFAULTS.sarvamModel) {
+      s.sarvamModel = DEFAULTS.sarvamModel;
     }
   } catch { /* ignore — a corrupt blob is the defaults, never a crash */ }
   return s;
@@ -290,6 +318,7 @@ export function applyOverlayParams(base: Settings, qp: URLSearchParams): Setting
   if (qp.get("fit") === "width") s.overlayFitWidth = true;
   if (qp.has("tbg")) s.textBgOpacity = parseOverlayOpacity(qp.get("tbg"));
   if (qp.has("panel")) s.panelFixed = qp.get("panel") === "1";
+  if (qp.has("ailabel")) s.aiLabel = qp.get("ailabel") === "1";
   if (qp.has("dwell"))    s.lineMinDwellSec    = clampNum(qp.get("dwell"), 0.25, 10, s.lineMinDwellSec);
   // `clearafter` is the older name for the same knob and is still honoured —
   // overlay URLs minted before this change are pasted into vMix and PP and
@@ -300,7 +329,9 @@ export function applyOverlayParams(base: Settings, qp: URLSearchParams): Setting
 }
 
 export function saveSettings(s: Settings): void {
-  writeStored(STORAGE_KEY, JSON.stringify({ ...s, [SCHEMA_FIELD]: SETTINGS_SCHEMA }));
+  writeStored(STORAGE_KEY, JSON.stringify({
+    ...s, [SCHEMA_FIELD]: SETTINGS_SCHEMA, [MODEL_DEFAULT_FIELD]: DEFAULTS.sarvamModel,
+  }));
 }
 
 // Mint an overlay URL for ProPresenter's Web Object. Returns an absolute
@@ -328,6 +359,7 @@ export function buildOverlayUrl(s: Settings, base?: string): string {
   // A setting that only round-trips in one direction is not a setting.
   p.set("tbg", String(Math.round(s.textBgOpacity * 100)));
   p.set("panel", s.panelFixed ? "1" : "0");
+  p.set("ailabel", s.aiLabel ? "1" : "0");
   p.set("dwell", String(s.lineMinDwellSec));
   p.set("maxdwell", String(s.captionMaxDwellSec));
   const root = base ?? origin();

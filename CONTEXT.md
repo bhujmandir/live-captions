@@ -27,7 +27,7 @@ A holy person in the tradition; a term of respect, not a rank.
 _Avoid_: saint, monk, holy man
 
 **Bhagvan**:
-God, as named in the katha. Manish's spelling, with a **v**.
+God, as named in the katha. Spelt with a **v**.
 _Avoid_: Bhagwan, God, the Lord, the deity
 
 **mandir**:
@@ -56,8 +56,8 @@ two **lines** that may have come from different captions.
 _Avoid_: subtitle (when the burnt-in overlay is meant), text, line
 
 **line**:
-One row of words as the sabha reads it — the unit Manish gives all his instructions in: *"2 on
-the screen and 3rd 1 is on the queue and 4th one is being constructed"*. A line is a rendering
+One row of words as the sabha reads it — the unit the display is specified in: two on the
+screen, a third on the queue and a fourth being constructed. A line is a rendering
 fact, not a language one: the same released sentence is one line at 60px and three at 140px.
 Four states, and they are distinct:
 
@@ -94,8 +94,8 @@ _Avoid_: widget, banner, lower-third, graphic
 
 **the panel**:
 The translucent slab behind the caption text, so the words stay readable over any picture.
-Manish calls this *"the 25% capacity block background"* — and that is the collision to know
-about: **his "block" is this, and the tool's "block" is the other thing below.** Say *panel*.
+It has been called *"the 25% capacity block background"* — and that is the collision to know
+about: **that "block" is this, and the tool's "block" is the other thing below.** Say *panel*.
 It is one fixed rectangle on purpose; a panel that hugged the text would change shape on every
 line, and a moving background is harder to read past than a still one.
 _Avoid_: block, background, backdrop, box
@@ -161,7 +161,7 @@ nothing is showing, and that failure looks identical to success on the status bo
 ⚠️ **Nothing inside this tool can tell you whether captions are on air.** The status board sees
 surfaces; the vMix API can be asked which input sits on which overlay channel. Neither is the
 answer. On 4 September the overlay channels read as though captions were off and they were on —
-Manish settled it in seconds by opening the YouTube stream. **Look at the output.** An inference
+opening the YouTube stream settled it in seconds. **Look at the output.** An inference
 from overlay numbers is a guess, and reporting one as a fault costs somebody a scare mid-katha.
 _Avoid_: live (ambiguous with "the live katha"), visible, active
 
@@ -205,8 +205,8 @@ _Avoid_: skipped, overflow
 
 **the mandir PC**:
 The Windows machine at S.K.S.S. Bolton that runs vMix and the captions server. The only machine
-where any of this is real. It is spoken to through issues and comments on the tracker; it is not
-reachable any other way.
+where any of this is real. It cannot be reached from a development machine; anything to be
+checked there is checked by a person sitting at it.
 _Avoid_: the server, the box, prod, the control room PC
 
 **the outage**:

@@ -164,7 +164,13 @@ def load_rules(rules_path: Path) -> list[_Rule]:
         log.info(f"No {rules_path.name} found — rules pass disabled")
         return []
     try:
-        data = json.loads(rules_path.read_text())
+        raw = rules_path.read_bytes()
+        # UTF-8, or cp1252 from a Windows install older than 6 Oct; the
+        # server's own loader accepts both, so this one must too.
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            data = json.loads(raw.decode("cp1252"))
     except Exception as e:
         log.warning(f"Failed to parse {rules_path}: {e!r}")
         return []
